@@ -1,6 +1,6 @@
-import { Script } from 'scripting'
+import { Script, Widget } from 'scripting'
 import { readCache } from './api'
-import { readToken, readAccountIdentity } from './credentials'
+import { readToken } from './credentials'
 import { readSettings, settingsForSize, visibleButtons, type WidgetSize } from './settings'
 import { parseControlRequest, createConfirmationExecutor, type ControlRequest } from './command-confirmation'
 
@@ -14,7 +14,7 @@ const key = (size: WidgetSize) => PREFIX + size
 function store(size: WidgetSize, value: WidgetConfirmation | null) {
   if (Storage.set(key(size), value) === false) throw new Error('确认状态保存失败，请重新操作')
 }
-function clear(size: WidgetSize) { store(size, null); Keychain.set(key(size), '') }
+function clear(size: WidgetSize) { store(size, null) }
 function allowed(request: ControlRequest, slot: number) {
   const options = settingsForSize(readSettings(), request.size)
   return Number.isInteger(slot) && slot >= 0 && slot < visibleButtons(options).length &&
@@ -25,7 +25,7 @@ export function readWidgetConfirmation(size: WidgetSize, now = Date.now()): Widg
   if (!state) return null
   if (state.size !== size || !['pending', 'running', 'error'].includes(state.phase) ||
     !Number.isFinite(state.expiresAt) || state.expiresAt <= now ||
-    readCache()?.machineId !== state.machineId || !readToken() || state.accountId !== readAccountIdentity() || Keychain.get(key(size)) !== readAccountIdentity() ||
+    !readCache()?.machineId || !readToken() ||
     !allowed(state, state.slot)) { clear(size); return null }
   return state
 }
@@ -33,33 +33,42 @@ export function beginWidgetConfirmation(parameters: StartConfirmation, now = Dat
   const request = parseControlRequest(parameters)
   if (!request || typeof parameters.id !== 'string' || !/^[a-zA-Z0-9-]{8,100}$/.test(parameters.id) ||
     !Number.isFinite(parameters.issuedAt) || parameters.issuedAt <= 0 || parameters.issuedAt > now ||
-    request.accountId !== readAccountIdentity() || !allowed(request, parameters.slot) || readCache()?.machineId !== request.machineId || !readToken()) return
+    !allowed(request, parameters.slot) || !readCache()?.machineId || !readToken()) return
   // A dashboard may remain visible for hours. Allow its first tap, but never re-arm
   // an already consumed dashboard snapshot, even after cancellation or expiration.
   const sourceKey = key(request.size) + '.lastSource'
   const lastSource = Storage.get<number>(sourceKey) || 0
   if (parameters.issuedAt <= lastSource || readWidgetConfirmation(request.size, now)) return
   if (Storage.set(sourceKey, parameters.issuedAt) === false) throw new Error('确认状态保存失败')
-  if (Keychain.set(key(request.size), readAccountIdentity()) === false) throw new Error('授权校验保存失败')
   store(request.size, { ...request, id: parameters.id, slot: parameters.slot, issuedAt: parameters.issuedAt,
-    readyAt: now + 1200, expiresAt: now + 60000, phase: 'pending' })
+    readyAt: now, expiresAt: now + 60000, phase: 'pending' })
 }
 export function cancelWidgetConfirmation({ size, id }: { size: string; id: string }): void {
   if (!validSize(size)) return
   const state = readWidgetConfirmation(size)
   if (state?.id === id && state.phase !== 'running') clear(size)
 }
+export function recentlyFinishedConfirmation(size: WidgetSize, now = Date.now()): boolean {
+  const finished = Storage.get<number>(key(size) + '.finished')
+  return typeof finished === 'number' && now >= finished && now - finished < 15000
+}
 export async function submitWidgetConfirmation({ size, id }: { size: string; id: string }): Promise<void> {
   if (!validSize(size)) return
   const state = readWidgetConfirmation(size)
-  if (!state || state.id !== id || state.phase !== 'pending' || Date.now() < state.readyAt) return
+  if (!state || state.id !== id || state.phase !== 'pending') return
   // Persist the consumed state before any await, so repeated taps cannot resubmit this ticket.
   store(size, { ...state, phase: 'running', expiresAt: Date.now() + 120000 })
   try {
+    Widget.reloadAll()
+    // Yield the JS event loop before networking, without adding an artificial wait.
+    await new Promise<void>(resolve => setTimeout(resolve, 0))
     await createConfirmationExecutor(state)()
-    if (Storage.get<WidgetConfirmation>(key(size))?.id === id) clear(size)
+    if (Storage.get<WidgetConfirmation>(key(size))?.id === id) {
+      Storage.set(key(size) + '.finished', Date.now())
+      clear(size)
+    }
   } catch (e) {
     if (Storage.get<WidgetConfirmation>(key(size))?.id === id) store(size, { ...state, phase: 'error',
       expiresAt: Date.now() + 60000, message: e instanceof Error ? e.message : String(e) })
-  }
+  } finally { Widget.reloadAll() }
 }

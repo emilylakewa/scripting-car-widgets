@@ -38,7 +38,7 @@ export function SettingsScreen() {
     </Section>
     <Section header={<Text>管理</Text>}>
       {menu('恢复设置', '恢复各尺寸与通用显示设置', <ResetAllScreen />)}
-      <Text font={11} foregroundStyle="#7A8494">小组件车联 · 3.1.0</Text>
+      <Text font={11} foregroundStyle="#7A8494">小组件车联 · 3.2.0</Text>
     </Section>
   </List></NavigationStack>
 }
@@ -120,6 +120,11 @@ function DisplayScreen({ size }: { size: WidgetSize }) {
   const { s, update } = usePreferences(size)
   return page(SIZE_NAMES[size] + ' · 显示内容', <>
     {size === 'small' ? <Section header={<Text>布局</Text>}><Picker title="小号布局" value={s.smallStyle} onChanged={(v: string) => update('smallStyle', v)}><Text tag="classic">信息卡片</Text><Text tag="ring">油量圆环</Text></Picker></Section> : null}
+    {size === 'small' && s.smallStyle === 'ring' ? <Section header={<Text>油量圆环</Text>} footer={<Text>选择车图下方显示的信息。“不显示”会隐藏这一行；没有接口读数时显示未知或 --。</Text>}>
+      <Picker title="车图下方显示内容" value={!supportsTires() && s.smallRingInfo.startsWith('tire') ? 'blank' : s.smallRingInfo} onChanged={(v: string) => update('smallRingInfo', v)}>
+        {INFO_OPTIONS.filter(item => supportsTires() || !item.id.startsWith('tire')).map(item => <Text key={item.id} tag={item.id}>{item.name}</Text>)}
+      </Picker>
+    </Section> : null}
     <Section header={<Text>车辆信息</Text>}>
       <TextField title="自定义车型名称" value={s.name} onChanged={v => update('name', v)} prompt="留空使用接口名称" />
       <Toggle title="显示车牌" value={s.showPlate} onChanged={v => update('showPlate', v)} />

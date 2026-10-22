@@ -1,5 +1,5 @@
-import { loadCar, readCache, writeCache, patchCache, sendCommand, type CarData } from './api'
-import { readToken, readAccountIdentity } from './credentials'
+import { loadCar, writeCache, patchCache, sendCommand, type CarData } from './api'
+import { readToken } from './credentials'
 import type { WidgetSize } from './settings'
 
 export type ControlRequest = { action: string; target: boolean; machineId: string; size: WidgetSize; accountId: string }
@@ -8,10 +8,8 @@ export function parseControlRequest(parameters: Record<string, unknown>): Contro
   if (typeof parameters.confirmAction !== 'string' || !ACTIONS.includes(parameters.confirmAction)) return null
   const action = parameters.confirmAction
   if (['lock', 'window', 'engine', 'ac'].includes(action) && parameters.confirmTarget !== '0' && parameters.confirmTarget !== '1') return null
-  if (typeof parameters.confirmAccount !== 'string' || !parameters.confirmAccount || parameters.confirmAccount.length > 200) return null
-  if (typeof parameters.confirmVehicle !== 'string' || !parameters.confirmVehicle.trim() || parameters.confirmVehicle.length > 200) return null
   if (!['small', 'medium', 'large', 'extraLarge'].includes(String(parameters.confirmSize))) return null
-  return { action, target: parameters.confirmTarget === '1', machineId: parameters.confirmVehicle, size: parameters.confirmSize as WidgetSize, accountId: parameters.confirmAccount }
+  return { action, target: parameters.confirmTarget === '1', machineId: String(parameters.confirmVehicle || ''), size: parameters.confirmSize as WidgetSize, accountId: String(parameters.confirmAccount || '') }
 }
 export function requestedCommand(request: ControlRequest): { label: string; command: string; data: any; raw?: boolean; patch?: Partial<CarData> } {
   const on = request.target
@@ -34,15 +32,15 @@ export function createConfirmationExecutor(request: ControlRequest): () => Promi
   return async () => {
     if (submitted) throw new Error('本次确认已提交，请关闭后重新操作')
     submitted = true
-    const token = readToken(), cached = readCache()
-    if (!token || request.accountId !== readAccountIdentity() || cached?.machineId !== request.machineId) throw new Error('授权或车辆已变化，请刷新车况后重新操作')
+    if (!readToken()) throw new Error('请先填写 Token')
     const command = requestedCommand(request)
-    const fresh = await loadCar()
-    if (fresh.machineId !== request.machineId || readToken() !== token || request.accountId !== readAccountIdentity()) throw new Error('授权或车辆已变化，本次操作已取消')
-    writeCache(fresh)
-    if (request.action === 'refresh') return '车况已刷新'
-    const result = await sendCommand(command.command, command.data, command.raw, request)
-    if (command.patch && request.accountId === readAccountIdentity() && readToken() === token && readCache()?.machineId === request.machineId) patchCache(command.patch)
+    if (request.action === 'refresh') {
+      const fresh = await loadCar()
+      writeCache(fresh)
+      return '车况已刷新'
+    }
+    const result = await sendCommand(command.command, command.data, command.raw)
+    if (command.patch) patchCache(command.patch)
     return result
   }
 }

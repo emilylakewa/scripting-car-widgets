@@ -18,10 +18,10 @@ import { loadCar, writeCache, readCache, type CarData } from './api'
 import { BeginConfirmationIntent, CancelConfirmationIntent, SubmitConfirmationIntent, ACIntent, TrunkIntent, CoolIntent, HotIntent, FindIntent, EngineIntent, LockIntent, RefreshIntent, WindowIntent } from './app_intents'
 
 import { readSettings, settingsForSize, widgetSizeFor, infoBackgroundOf, visibleButtons, fontSizeOf, fontColorOf, buttonBackgroundOf, buttonTextOf, buttonIconOf, carScaleOf, backgroundDimOf, imagePath, gradientOf, plateText, reminderLines, themeOf } from './settings'
-import { updateText, readAccountIdentity, supportsTires } from './credentials'
-import { readWidgetConfirmation, type WidgetConfirmation } from './widget-confirmation'
+import { updateText, supportsTires } from './credentials'
+import { readWidgetConfirmation, recentlyFinishedConfirmation, type WidgetConfirmation } from './widget-confirmation'
 import { requestedCommand } from './command-confirmation'
-import { needsAttention, statusTint } from './vehicle-state'
+import { statusTint } from './vehicle-state'
 import { dashboardLayout, isDashboardFamily, known, metricItems, stateItems, tireItems, dashboardAttention, parkingText, engineText } from './dashboard-model'
 const widgetSize = widgetSizeFor(String(Widget.family), displaySize().width, displaySize().height)
 const settings = settingsForSize(readSettings(), widgetSize)
@@ -265,27 +265,52 @@ function directButtonAction(id: string, d: CarData) {
   }
 }
 function ringBody(d: CarData) {
-  const buttonWidth = (displaySize().width - 18 - 4 * (BUTTONS.length - 1)) / BUTTONS.length
-  const pct = Math.max(0, Math.min(100, d.fuelPct))
-  const length = 2 * Math.PI * 39
-  const color = pct < 20 ? '#FBBF24' : accent
-  const svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><circle cx="50" cy="50" r="39" fill="none" stroke="rgba(255,255,255,0.13)" stroke-width="5"/><circle cx="50" cy="50" r="39" fill="none" stroke="' + color + '" stroke-width="5" stroke-linecap="round" stroke-dasharray="' + (length*pct/100) + ' ' + length + '" transform="rotate(-90 50 50)"/></svg>'
-  return <VStack spacing={2} padding={9} frame={{ maxWidth: 'infinity', maxHeight: 'infinity' }}>
-    <Link url={OPEN_URL}><Text font={fontSizeOf(settings, 14)} fontWeight="bold" foregroundStyle={fontColorOf(settings, 'white')} lineLimit={1}>{title(d)}</Text></Link>
-    <Button intent={RefreshIntent({ accountId: d.accountId, machineId: d.machineId, size: widgetSize })} buttonStyle="plain">
-      <ZStack frame={{ height: Math.max(50, displaySize().height - 95), maxWidth: 'infinity' }}>
-        <SVG code={svg} resizable renderingMode="original" frame={{ width: 63, height: 63 }} />
-        <VStack spacing={0}>
-          <Image filePath={CAR_IMAGE_PATH} resizable scaleToFit frame={{ width: Math.min(76 * carScaleOf(settings), displaySize().width - 24), height: Math.min(35 * carScaleOf(settings), 42) }} />
-          <Text font={fontSizeOf(settings, 11)} fontWeight="bold" foregroundStyle={pct < 20 ? color : fontColorOf(settings, color)}>{pct.toFixed(0)}%</Text>
+  const { width, height } = displaySize()
+  const pad = 9, gap = 3, innerWidth = width - pad * 2
+  const titleHeight = Math.ceil(fontSizeOf(settings, 14) * 1.25)
+  const stateHeight = Math.ceil(fontSizeOf(settings, 8) * 1.3)
+  const timeHeight = Math.ceil(fontSizeOf(settings, 7) * 1.3)
+  const detailsHeight = stateHeight + timeHeight + 2
+  const buttonHeight = 30
+  const mainHeight = Math.max(1, height - pad * 2 - titleHeight - detailsHeight - buttonHeight - gap * 3)
+  const diameter = Math.min(mainHeight, innerWidth * 0.47, 88)
+  const carWidth = innerWidth - diameter - 7
+  const buttonWidth = (innerWidth - 4 * (BUTTONS.length - 1)) / BUTTONS.length
+  const available = known(d, 'fuelPct') && Number.isFinite(d.fuelPct)
+  const pct = available ? Math.max(0, Math.min(100, d.fuelPct)) : 0
+  const length = 2 * Math.PI * 44
+  const color = available && pct < 20 ? '#FBBF24' : accent
+  const svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><circle cx="50" cy="50" r="44" fill="none" stroke="rgba(255,255,255,0.12)" stroke-width="5"/>' + (available && pct > 0 ? '<circle cx="50" cy="50" r="44" fill="none" stroke="' + color + '" stroke-width="5" stroke-linecap="round" stroke-dasharray="' + (length * pct / 100) + ' ' + length + '" transform="rotate(-90 50 50)"/>' : '') + '</svg>'
+  const info = metricItems(d, [settings.smallRingInfo])[0]
+  const infoText = info ? `${settings.smallRingInfo === 'oil' ? '剩余' : info.label} ${info.value}${info.unit ? ' ' + info.unit : ''}` : ''
+  const binding = { accountId: d.accountId, machineId: d.machineId, size: widgetSize }
+  return <VStack spacing={gap} padding={pad} frame={{ width, height }}>
+    <Link url={OPEN_URL}><Text font={fontSizeOf(settings, 14)} fontWeight="bold" foregroundStyle={fontColorOf(settings, 'white')} lineLimit={1} minScaleFactor={0.65} frame={{ width: innerWidth, height: titleHeight }}>{title(d)}</Text></Link>
+    <Button intent={RefreshIntent(binding)} buttonStyle="plain" frame={{ width: innerWidth, height: mainHeight }}>
+      <HStack spacing={7} frame={{ width: innerWidth, height: mainHeight }}>
+        <ZStack frame={{ width: diameter, height: diameter }}>
+          <SVG code={svg} resizable renderingMode="original" frame={{ width: diameter, height: diameter }} />
+          <VStack spacing={1} frame={{ width: diameter * 0.7 }}>
+            <Text font={fontSizeOf(settings, 17)} fontWeight="semibold" foregroundStyle={fontColorOf(settings, color)} lineLimit={1} minScaleFactor={0.55}>{available ? `${pct.toFixed(0)}%` : '--'}</Text>
+            <Text font={fontSizeOf(settings, 6.5)} foregroundStyle={fontColorOf(settings, '#A3B4CD')} lineLimit={1} minScaleFactor={0.6}>燃油余量</Text>
+          </VStack>
+        </ZStack>
+        <VStack spacing={4} frame={{ width: carWidth, height: mainHeight }}>
+          <Image filePath={CAR_IMAGE_PATH} resizable scaleToFit frame={{ width: Math.min(carWidth, carWidth * 0.94 * carScaleOf(settings)), height: Math.min(mainHeight * 0.65, mainHeight * 0.48 * carScaleOf(settings)) }} />
+          {info ? <Text font={fontSizeOf(settings, 8)} foregroundStyle={info.alert ? '#FB923C' : fontColorOf(settings, '#C3D1E4')} lineLimit={1} minScaleFactor={0.65}>{infoText}</Text> : null}
         </VStack>
-      </ZStack>
+      </HStack>
     </Button>
-    {!needsAttention(d) && settings.showIcons && warningItems(d).length ? warningRow(warningItems(d), true) : <Text font={fontSizeOf(settings, 8)} foregroundStyle={statusTint(d, fontColorOf(settings, 'rgba(255,255,255,0.76)'))} lineLimit={1} minScaleFactor={0.65}>{stateText(d)}</Text>}
-    <Text font={fontSizeOf(settings, 7)} foregroundStyle={fontColorOf(settings, 'rgba(255,255,255,0.5)')} lineLimit={1}>{updateText(d.updatedAt, Date.now(), settings.updateTimeStyle)}</Text>
-    <HStack spacing={4}>
+    <VStack spacing={2} frame={{ width: innerWidth, height: detailsHeight }}>
+      <HStack spacing={4} frame={{ width: innerWidth, height: stateHeight }}>
+        <Text font={fontSizeOf(settings, 8)} foregroundStyle={statusTint(d, fontColorOf(settings, 'rgba(255,255,255,0.76)'))} lineLimit={1} minScaleFactor={0.65}>{stateText(d)}</Text>
+        {settings.showIcons ? warningItems(d).filter(item => item.icon !== 'lock.open.fill').slice(0, 2).map(item => <Image key={item.label} systemName={item.icon} resizable scaleToFit foregroundStyle={item.tint} frame={{ width: 7, height: 7 }} />) : null}
+      </HStack>
+      <Text font={fontSizeOf(settings, 7)} foregroundStyle={fontColorOf(settings, 'rgba(255,255,255,0.5)')} lineLimit={1} minScaleFactor={0.65} frame={{ width: innerWidth, height: timeHeight }}>{updateText(d.updatedAt, Date.now(), settings.updateTimeStyle)}</Text>
+    </VStack>
+    <HStack spacing={4} frame={{ width: innerWidth, height: buttonHeight }}>
       {BUTTONS.map((id, index) => {
-        if (id === 'blank') return <Spacer key={index} frame={{ width: buttonWidth, height: 30 }} />
+        if (id === 'blank') return <Spacer key={index} frame={{ width: buttonWidth, height: buttonHeight }} />
         const action = buttonAction(id, d, index)
         return <HStack key={index} spacing={0}>{smallButton(buttonWidth, action.icon, action.intent, action.tint, action.confirmationIntent)}</HStack>
       })}
@@ -295,7 +320,7 @@ function ringBody(d: CarData) {
 function dashboardPanel(children: any, width: number, height: number, padding = 10) {
   return <ZStack frame={{ width, height }}>
     <RoundedRectangle cornerRadius={12} fill={infoBackgroundOf(settings)} frame={{ width, height }} />
-    <VStack alignment="leading" spacing={3} padding={padding} frame={{ width, height, alignment: 'leading' }}>{children}</VStack>
+    <VStack alignment="center" spacing={3} padding={padding} frame={{ width, height, alignment: 'center' }}>{children}</VStack>
   </ZStack>
 }
 function dashboardHeader(d: CarData, width: number, height: number) {
@@ -313,6 +338,8 @@ function dashboardHeader(d: CarData, width: number, height: number) {
 function dashboardHero(d: CarData, width: number, height: number) {
   const summaryWidth = Math.min(100, width * 0.3)
   const imageArea = width - summaryWidth - 6
+  const timeHeight = fontSizeOf(settings, 7.5) * 1.35
+  const imageHeight = Math.max(1, height - timeHeight - 2)
   const color = dashboardAttention(d) ? '#FB923C' : fontColorOf(settings, '#9AE6CB')
   return <Link url={OPEN_URL}><HStack spacing={6} frame={{ width, height }}>
     <VStack alignment="leading" spacing={4} frame={{ width: summaryWidth, alignment: 'leading' }}>
@@ -320,9 +347,12 @@ function dashboardHero(d: CarData, width: number, height: number) {
       <Text font={fontSizeOf(settings, height < 65 ? 13 : 17)} fontWeight="semibold" foregroundStyle={color} lineLimit={1} minScaleFactor={0.6}>{parkingText(d)}</Text>
       <Text font={fontSizeOf(settings, 8.5)} foregroundStyle={color} lineLimit={2} minScaleFactor={0.7}>{engineText(d)}</Text>
     </VStack>
-    <ZStack frame={{ width: imageArea, height }}>
-      <Image filePath={CAR_IMAGE_PATH} resizable scaleToFit frame={{ width: Math.min(imageArea, imageArea * 0.82 * carScaleOf(settings)), height: Math.min(height, height * 0.8 * carScaleOf(settings)) }} shadow={{ color: 'rgba(0,0,0,0.3)', radius: 5, x: 0, y: 4 }} />
-    </ZStack>
+    <VStack alignment="trailing" spacing={2} frame={{ width: imageArea, height }}>
+      <ZStack frame={{ width: imageArea, height: imageHeight }}>
+        <Image filePath={CAR_IMAGE_PATH} resizable scaleToFit frame={{ width: Math.min(imageArea, imageArea * 0.82 * carScaleOf(settings)), height: Math.min(imageHeight, imageHeight * 0.8 * carScaleOf(settings)) }} shadow={{ color: 'rgba(0,0,0,0.3)', radius: 5, x: 0, y: 4 }} />
+      </ZStack>
+      <Text font={fontSizeOf(settings, 7.5)} foregroundStyle={fontColorOf(settings, '#8CA1BC')} lineLimit={1} minScaleFactor={0.65} frame={{ width: imageArea, height: timeHeight, alignment: 'trailing' }}>{updateText(d.updatedAt, Date.now(), settings.updateTimeStyle)}</Text>
+    </VStack>
   </HStack></Link>
 }
 function dashboardMetrics(d: CarData, width: number, height: number, grid = false) {
@@ -334,10 +364,10 @@ function dashboardMetrics(d: CarData, width: number, height: number, grid = fals
   const tileHeight = (height - gap * (rows - 1)) / rows
   function row(items: typeof metrics, rowIndex: number) {
     return <HStack key={rowIndex} spacing={gap} frame={{ width, height: tileHeight, alignment: 'leading' }}>{items.map((item, index) => <HStack key={index} spacing={0}>{dashboardPanel(<>
-      <Text font={fontSizeOf(settings, tileHeight < 50 ? 7.5 : 9)} foregroundStyle={fontColorOf(settings, '#A3B7D0')} lineLimit={1}>{item.label}</Text>
-      <HStack alignment="firstTextBaseline" spacing={2}>
-        <Text font={fontSizeOf(settings, tileWidth < 80 ? 15 : 21)} fontWeight="semibold" foregroundStyle={item.alert ? '#FB923C' : fontColorOf(settings, 'white')} lineLimit={1} minScaleFactor={0.5}>{item.value}</Text>
-        {item.unit ? <Text font={fontSizeOf(settings, 7)} foregroundStyle={fontColorOf(settings, '#A3B7D0')}>{item.unit}</Text> : null}
+      <Text multilineTextAlignment="center" font={fontSizeOf(settings, tileHeight < 50 ? 7.5 : 9)} foregroundStyle={fontColorOf(settings, '#A3B7D0')} lineLimit={1}>{item.label}</Text>
+      <HStack alignment="firstTextBaseline" spacing={2} frame={{ maxWidth: 'infinity', alignment: 'center' }}>
+        <Text multilineTextAlignment="center" font={fontSizeOf(settings, tileWidth < 80 ? 15 : 21)} fontWeight="semibold" foregroundStyle={item.alert ? '#FB923C' : fontColorOf(settings, 'white')} lineLimit={1} minScaleFactor={0.5}>{item.value}</Text>
+        {item.unit ? <Text multilineTextAlignment="center" font={fontSizeOf(settings, 7)} foregroundStyle={fontColorOf(settings, '#A3B7D0')}>{item.unit}</Text> : null}
       </HStack>
     </>, tileWidth, tileHeight, tileHeight < 50 ? settings.fontScale > 100 ? 5 : 7 : 10)}</HStack>)}</HStack>
   }
@@ -351,9 +381,9 @@ function dashboardStates(d: CarData, width: number, height: number) {
   const rowHeight = (height - 16 - 4 * (rows - 1)) / rows
   const compact = height / rows < 40
   function row(index: number) {
-    return <HStack key={index} spacing={6} frame={{ width: width - 16, height: rowHeight, alignment: 'leading' }}>{items.slice(index * columns, (index + 1) * columns).map((item, i) => <VStack key={i} alignment="leading" spacing={1} frame={{ width: cellWidth, height: rowHeight, alignment: 'leading' }}>
-      <Text font={fontSizeOf(settings, compact ? 7 : 8.5)} foregroundStyle={fontColorOf(settings, '#90A8C6')} lineLimit={1}>{item.label}</Text>
-      <Text font={fontSizeOf(settings, compact ? 9 : 11)} fontWeight="medium" foregroundStyle={item.alert ? '#FB923C' : fontColorOf(settings, item.value === '未知' ? '#90A8C6' : '#C9E2DC')} lineLimit={1} minScaleFactor={0.6}>{item.value}</Text>
+    return <HStack key={index} spacing={6} frame={{ width: width - 16, height: rowHeight, alignment: 'leading' }}>{items.slice(index * columns, (index + 1) * columns).map((item, i) => <VStack key={i} alignment="center" spacing={1} frame={{ width: cellWidth, height: rowHeight, alignment: 'center' }}>
+      <Text multilineTextAlignment="center" font={fontSizeOf(settings, compact ? 7 : 8.5)} foregroundStyle={fontColorOf(settings, '#90A8C6')} lineLimit={1}>{item.label}</Text>
+      <Text multilineTextAlignment="center" font={fontSizeOf(settings, compact ? 9 : 11)} fontWeight="medium" foregroundStyle={item.alert ? '#FB923C' : fontColorOf(settings, item.value === '未知' ? '#90A8C6' : '#C9E2DC')} lineLimit={1} minScaleFactor={0.6}>{item.value}</Text>
     </VStack>)}</HStack>
   }
   return dashboardPanel(<VStack spacing={4}>{Array.from({ length: rows }, (_, i) => row(i))}</VStack>, width, height, 8)
@@ -361,21 +391,21 @@ function dashboardStates(d: CarData, width: number, height: number) {
 function dashboardTires(d: CarData, width: number, height: number) {
   const padding = height < 30 ? 2 : 6
   const cellWidth = (width - padding * 2 - 18) / 4
-  return dashboardPanel(<HStack spacing={6} frame={{ width: width - padding * 2, height: height - padding * 2 }}>{tireItems(d).map(item => <VStack key={item.label} alignment="leading" spacing={1} frame={{ width: cellWidth }}>
-    <Text font={fontSizeOf(settings, 7.5)} foregroundStyle={fontColorOf(settings, '#90A8C6')} lineLimit={1}>{item.label}</Text>
-    <Text font={fontSizeOf(settings, height < 30 ? 9 : 10)} fontWeight="medium" foregroundStyle={fontColorOf(settings, '#C9E2DC')} lineLimit={1} minScaleFactor={0.7}>{item.value}</Text>
+  return dashboardPanel(<HStack spacing={6} frame={{ width: width - padding * 2, height: height - padding * 2 }}>{tireItems(d).map(item => <VStack key={item.label} alignment="center" spacing={1} frame={{ width: cellWidth }}>
+    <Text multilineTextAlignment="center" font={fontSizeOf(settings, 7.5)} foregroundStyle={fontColorOf(settings, '#90A8C6')} lineLimit={1}>{item.label}</Text>
+    <Text multilineTextAlignment="center" font={fontSizeOf(settings, height < 30 ? 9 : 10)} fontWeight="medium" foregroundStyle={fontColorOf(settings, '#C9E2DC')} lineLimit={1} minScaleFactor={0.7}>{item.value}</Text>
   </VStack>)}</HStack>, width, height, padding)
 }
 function dashboardLocation(d: CarData, width: number, height: number) {
   return <Link url={OPEN_URL}>{dashboardPanel(<>
-    {height >= 54 ? <Text font={fontSizeOf(settings, 8)} foregroundStyle={fontColorOf(settings, '#90A8C6')}>{settings.showAddress ? '车辆位置' : '随行短句'}</Text> : null}
-    <Text font={fontSizeOf(settings, height > 40 ? 11 : 9)} foregroundStyle={fontColorOf(settings, '#CDD9E9')} lineLimit={height >= 54 ? 2 : 1} minScaleFactor={0.65}>{addressText(d)}</Text>
+    {height >= 54 ? <Text multilineTextAlignment="center" font={fontSizeOf(settings, 8)} foregroundStyle={fontColorOf(settings, '#90A8C6')}>{settings.showAddress ? '车辆位置' : '随行短句'}</Text> : null}
+    <Text multilineTextAlignment="center" font={fontSizeOf(settings, height > 40 ? 11 : 9)} foregroundStyle={fontColorOf(settings, '#CDD9E9')} lineLimit={height >= 54 ? 2 : 1} minScaleFactor={0.65}>{addressText(d)}</Text>
   </>, width, height, height >= 54 ? 10 : 7)}</Link>
 }
 function dashboardReminders(lines: string[], width: number, height: number) {
   if (!lines.length) return null
   const visible = lines.slice(0, height < 35 ? 1 : 2)
-  return <Link url={OPEN_URL}>{dashboardPanel(<VStack alignment="leading" spacing={2}>{visible.map((line, index) => <Text key={index} font={fontSizeOf(settings, height < 35 ? 8.5 : 10)} foregroundStyle={fontColorOf(settings, '#E8D6B1')} lineLimit={1} minScaleFactor={0.65}>{line}</Text>)}</VStack>, width, height, 7)}</Link>
+  return <Link url={OPEN_URL}>{dashboardPanel(<VStack alignment="center" spacing={2}>{visible.map((line, index) => <Text multilineTextAlignment="center" key={index} font={fontSizeOf(settings, height < 35 ? 8.5 : 10)} foregroundStyle={fontColorOf(settings, '#E8D6B1')} lineLimit={1} minScaleFactor={0.65}>{line}</Text>)}</VStack>, width, height, 7)}</Link>
 }
 function dashboardButtons(d: CarData, width: number, height: number) {
   const gap = 7
@@ -394,9 +424,6 @@ function dashboardButtons(d: CarData, width: number, height: number) {
     </ControlButton>
   })}</HStack>
 }
-function dashboardFooter(d: CarData, width: number, height: number) {
-  return <Text font={fontSizeOf(settings, 7.5)} foregroundStyle={fontColorOf(settings, '#8CA1BC')} lineLimit={1} frame={{ width, height, alignment: 'trailing' }}>{updateText(d.updatedAt, Date.now(), settings.updateTimeStyle)}</Text>
-}
 function largeBody(d: CarData) {
   const { width, height } = displaySize()
   const reminders = settings.showReminders ? reminderLines(settings, d) : []
@@ -410,8 +437,8 @@ function largeBody(d: CarData) {
     const leftWidth = Math.round((innerWidth - gap) * 0.49), rightWidth = innerWidth - gap - leftWidth
     const innerHeight = height - l.pad * 2, sectionGap = 8, header = 34
     const location = settings.showLocationCard ? 44 : 0, reminder = reminders.length ? 36 : 0
-    const leftGaps = [header, 1, location, reminder, 10].filter(value => value > 0).length - 1
-    const hero = innerHeight - header - location - 10 - reminder - sectionGap * leftGaps
+    const leftGaps = [header, 1, location, reminder].filter(value => value > 0).length - 1
+    const hero = innerHeight - header - location - reminder - sectionGap * leftGaps
     const buttons = 40
     const stateRows = Math.ceil(stateCount / 3), stateBase = Math.min(90, Math.floor(innerHeight * 0.3))
     const states = stateRows ? 16 + ((stateBase - 20) / 2) * stateRows + 4 * (stateRows - 1) : 0
@@ -424,7 +451,6 @@ function largeBody(d: CarData) {
         {dashboardHero(d, leftWidth, hero)}
         {location ? dashboardLocation(d, leftWidth, location) : null}
         {reminder ? dashboardReminders(reminders, leftWidth, reminder) : null}
-        {dashboardFooter(d, leftWidth, 10)}
       </VStack>
       <VStack spacing={sectionGap} frame={{ width: rightWidth, height: innerHeight, alignment: 'top' }}>
         {metricCount ? dashboardMetrics(d, rightWidth, metricHeight, true) : null}
@@ -443,7 +469,6 @@ function largeBody(d: CarData) {
     {l.location ? dashboardLocation(d, innerWidth, l.location) : null}
     {l.reminder ? dashboardReminders(reminders, innerWidth, l.reminder) : null}
     {dashboardButtons(d, innerWidth, l.buttons)}
-    {dashboardFooter(d, innerWidth, l.footer)}
   </VStack>
 }
 function Body({ data }: { data: CarData }) {
@@ -556,10 +581,25 @@ function ConfirmationBody({ state, data }: { state: WidgetConfirmation; data: Ca
     {content}
   </ZStack>
 }
+function presentContent(content: any, confirmation: WidgetConfirmation | null, path = '', exists = false) {
+  // Keep the same background and outer view when entering or leaving confirmation.
+  const size = displaySize()
+  Widget.present(<ZStack background={gradientOf(settings)} frame={{ width: size.width, height: size.height }}>
+    {exists ? <Image filePath={path} resizable scaleToFill clipped frame={{ width: size.width, height: size.height }} /> : null}
+    {exists && backgroundDimOf(settings) > 0 ? <RoundedRectangle cornerRadius={0} fill={`rgba(0,0,0,${backgroundDimOf(settings)})`} frame={{ width: size.width, height: size.height }} /> : null}
+    {content}
+  </ZStack>, { policy: 'after', date: confirmation ? new Date(Math.min(NEXT_RELOAD.getTime(), confirmation.expiresAt)) : NEXT_RELOAD })
+}
 async function main() {
   let cached = readCache()
   let confirmation = readWidgetConfirmation(widgetSize)
-  if (!confirmation && settings.autoRefresh && (!cached || Date.now() - cached.updatedAt >= settings.refreshMinutes * 60000)) {
+  // Opening confirmation follows the normal background path, as in 3.1.9.
+  // Only feedback after a tap bypasses asset checks.
+  if (confirmation && confirmation.phase !== 'pending' && cached) {
+    presentContent(<ConfirmationBody state={confirmation} data={cached} />, confirmation)
+    return
+  }
+  if (!confirmation && !recentlyFinishedConfirmation(widgetSize) && settings.autoRefresh && (!cached || Date.now() - cached.updatedAt >= settings.refreshMinutes * 60000)) {
     try { cached = await loadCar(); writeCache(cached) } catch { /* 网络失败保留上次成功快照 */ }
   }
   const family = String(Widget.family)
@@ -571,13 +611,9 @@ async function main() {
   const exists = path ? await FileManager.exists(path).catch(() => false) : false
   const carExists = settings.carImage ? await FileManager.exists(settings.carImage).catch(() => false) : true
   if (!carExists) { settings.carImage = ''; CAR_IMAGE_PATH = imagePath(settings) }
-  if (cached?.accountId !== readAccountIdentity()) cached = readCache()
-  if (confirmation?.accountId !== readAccountIdentity()) confirmation = readWidgetConfirmation(widgetSize)
+  cached = readCache()
+  confirmation = readWidgetConfirmation(widgetSize)
   const content = cached ? confirmation ? <ConfirmationBody state={confirmation} data={cached} /> : <Body data={cached} /> : <Link url={OPEN_URL}><EmptyView /></Link>
-  Widget.present(<ZStack background={gradientOf(settings)} frame={{ width: displaySize().width, height: displaySize().height }}>
-    {exists ? <Image filePath={path} resizable scaleToFill clipped frame={{ width: displaySize().width, height: displaySize().height }} /> : null}
-    {exists && backgroundDimOf(settings) > 0 ? <RoundedRectangle cornerRadius={0} fill={`rgba(0,0,0,${backgroundDimOf(settings)})`} frame={{ width: displaySize().width, height: displaySize().height }} /> : null}
-    {content}
-  </ZStack>, { policy: 'after', date: confirmation ? new Date(Math.min(NEXT_RELOAD.getTime(), confirmation.expiresAt)) : NEXT_RELOAD })
+  presentContent(content, confirmation, path, exists)
 }
 main()

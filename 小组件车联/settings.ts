@@ -14,7 +14,7 @@ export type WidgetOptions = {
   buttonConfirmations: boolean[]; buttonIconColor: string
   fontColor: string; buttonBackgroundColor: string; buttonTextColor: string
   carScale: number; backgroundDim: number; buttonCount: number; buttons: string[]
-  smallStyle: string; lastButton: string; refreshMinutes: number; autoRefresh: boolean
+  smallStyle: string; smallRingInfo: string; lastButton: string; refreshMinutes: number; autoRefresh: boolean
   carImage: string; smallBackground: string; mediumBackground: string; largeBackground: string
   maintenanceDate: string; insuranceDate: string; inspectionDate: string; maintenanceKm: string
 }
@@ -32,7 +32,7 @@ export const DEFAULTS: Settings = {
   buttonConfirmations: [false, false, false, false], buttonIconColor: '',
   fontColor: '', buttonBackgroundColor: '', buttonTextColor: '',
   carScale: 100, backgroundDim: 0, buttonCount: 4, buttons: ['refresh', 'lock', 'window', 'engine'],
-  smallStyle: 'classic', lastButton: 'engine', refreshMinutes: 30, autoRefresh: true,
+  smallStyle: 'classic', smallRingInfo: 'oil', lastButton: 'engine', refreshMinutes: 30, autoRefresh: true,
   carImage: '', smallBackground: '', mediumBackground: '', largeBackground: '',
   maintenanceDate: '', insuranceDate: '', inspectionDate: '', maintenanceKm: '',
 }
@@ -56,6 +56,7 @@ function normalizeSettings(saved: Partial<Settings>): Settings {
   settings.updateTimeStyle = settings.updateTimeStyle === 'relative' ? 'relative' : 'absolute'
   settings.carScale = bounded(settings.carScale, 60, 160, 100)
   settings.buttonCount = Math.round(bounded(settings.buttonCount, 1, 4, 4))
+  settings.smallRingInfo = INFO_OPTIONS.some(option => option.id === settings.smallRingInfo) ? settings.smallRingInfo : 'oil'
   settings.backgroundDim = bounded(settings.backgroundDim, 0, 70, 0)
   const buttons = Array.isArray(saved.buttons) ? saved.buttons : ['refresh', 'lock', 'window', saved.lastButton || 'engine']
   settings.buttons = DEFAULTS.buttons.map((fallback, i) => ACTIONS.some(a => a.id === buttons[i]) ? buttons[i] : fallback)
@@ -162,7 +163,7 @@ const PROFILE_KEYS = [
   'theme', 'name', 'plate', 'showPlate', 'showAddress', 'quote', 'showIcons', 'showTemp',
   'fontScale', 'fontColor', 'infoBackgroundColor', 'infoBackgroundTransparency',
   'buttonBackgroundColor', 'buttonBackgroundTransparency', 'buttonTextColor', 'buttonIconColor', 'buttonConfirmations',
-  'carScale', 'backgroundDim', 'buttonCount', 'buttons', 'smallStyle', 'lastButton',
+  'carScale', 'backgroundDim', 'buttonCount', 'buttons', 'smallStyle', 'smallRingInfo', 'lastButton',
   'refreshMinutes', 'autoRefresh', 'updateTimeStyle', 'carImage', 'smallBackground',
   'mediumBackground', 'largeBackground', 'extraLargeBackground', 'metricSlots', 'stateSlots',
   'showMetrics', 'showStates', 'showTires', 'showLocationCard', 'showReminders',

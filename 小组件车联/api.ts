@@ -211,23 +211,18 @@ export async function loadCar(): Promise<CarData> {
   }
 }
 
-export async function sendCommand(command: string, data: unknown, alreadyString = false, expected?: { accountId: string; machineId: string }): Promise<string> {
+export async function sendCommand(command: string, data: unknown, alreadyString = false): Promise<string> {
   const account = requireAccount()
-  if (expected && expected.accountId !== accountIdentity(account)) throw new Error('授权或服务已变化，请重新操作')
-  let car = readCache()
-  if (!car?.machineId) { car = await loadCar(); writeCache(car) }
-  assertCurrentAccount(account)
-  if (car.accountId !== accountIdentity(account) || (expected && expected.machineId !== car.machineId)) throw new Error('操作车辆已变化，请刷新车况后重新操作')
+  const car = readCache()
+  if (!car?.machineId) throw new Error('还没有车辆设备号，请先刷新一次车况')
   const res = await fetch(`https://${PROVIDERS[account.provider].host}/api/command/sendCommand`, {
     method: 'POST', timeout: 12,
     headers: { 'Content-Type': 'application/json;charset=utf-8', Accept: '*/*', Authorization: account.token },
     body: JSON.stringify({ command, machineId: car.machineId, data: alreadyString ? String(data ?? '') : JSON.stringify(data ?? {}) }),
   })
-  assertCurrentAccount(account)
   if (res.status === 401 || res.status === 403) throw new Error('Token 无效或已过期，请在授权与地图中更新')
   if (!res.ok) throw new Error(`HTTP ${res.status}`)
   const obj: any = await res.json()
-  assertCurrentAccount(account)
   if (String(obj?.status) !== '200') throw new Error(obj?.message || `状态 ${obj?.status}`)
   return String(obj?.message || '指令已发送')
 }

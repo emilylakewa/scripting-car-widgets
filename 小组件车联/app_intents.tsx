@@ -1,6 +1,8 @@
 import { AppIntentManager, AppIntentProtocol, Widget } from 'scripting'
 import { beginWidgetConfirmation, cancelWidgetConfirmation, submitWidgetConfirmation, type StartConfirmation } from './widget-confirmation'
-import { parseControlRequest, createConfirmationExecutor } from './command-confirmation'
+import { parseControlRequest, requestedCommand } from './command-confirmation'
+
+import { loadCar, patchCache, readCache, sendCommand, writeCache } from './api'
 
 type Binding = { accountId: string; machineId: string; size: string }
 async function execute(action: string, target: boolean, parameters: Binding): Promise<void> {
@@ -8,7 +10,20 @@ async function execute(action: string, target: boolean, parameters: Binding): Pr
     const request = parseControlRequest({ confirmAction: action, confirmTarget: target ? '1' : '0',
       confirmVehicle: parameters?.machineId, confirmSize: parameters?.size, confirmAccount: parameters?.accountId })
     if (!request) throw new Error('组件操作已失效，请刷新后重试')
-    await createConfirmationExecutor(request)()
+    const previous = readCache()
+    if (action === 'refresh') {
+      const fresh = await loadCar()
+      writeCache(fresh)
+      return
+    }
+    const command = requestedCommand(request)
+    // 3.0.2: direct buttons update their snapshot first, then send immediately.
+    if (command.patch) { patchCache(command.patch); Widget.reloadAll() }
+    try { await sendCommand(command.command, command.data, command.raw) }
+    catch (e) {
+      if (command.patch && previous) writeCache(previous)
+      throw e
+    }
   } finally { Widget.reloadAll() }
 }
 
@@ -94,10 +109,6 @@ export const CancelConfirmationIntent = AppIntentManager.register({
 export const SubmitConfirmationIntent = AppIntentManager.register({
   name: 'CarLinkCarSubmitConfirmation', protocol: AppIntentProtocol.AppIntent,
   perform: async (parameters: { size: string; id: string }) => {
-    try {
-      const completion = submitWidgetConfirmation(parameters)
-      Widget.reloadAll()
-      await completion
-    } finally { Widget.reloadAll() }
+    await submitWidgetConfirmation(parameters)
   },
 })

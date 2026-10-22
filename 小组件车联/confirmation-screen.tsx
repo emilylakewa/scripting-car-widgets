@@ -1,6 +1,5 @@
 import { Button, Navigation, NavigationStack, List, Section, Text, Widget, useState } from 'scripting'
 import { readCache } from './api'
-import { readAccountIdentity } from './credentials'
 import { readSettings, settingsForSize, plateText } from './settings'
 import { parseControlRequest, requestedCommand, createConfirmationExecutor } from './command-confirmation'
 
@@ -8,7 +7,7 @@ export function CommandConfirmation({ parameters }: { parameters: Record<string,
   const dismiss = Navigation.useDismiss()
   const request = parseControlRequest(parameters)
   const cached = readCache()
-  const valid = !!request && request.accountId === readAccountIdentity() && cached?.machineId === request.machineId
+  const valid = !!request && !!cached?.machineId
   const options = request ? settingsForSize(readSettings(), request.size) : readSettings()
   const [execute] = useState(() => request ? createConfirmationExecutor(request) : null)
   const [message, setMessage] = useState('请核对车辆和操作，只有点击“确认执行”才会发送指令。')

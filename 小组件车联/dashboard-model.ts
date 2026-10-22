@@ -88,7 +88,7 @@ export function dashboardLayout(width: number, height: number, hasReminders: boo
   const location = sections.location === false ? 0 : compact ? 26 : 60
   const reminder = hasReminders ? compact ? 24 : 48 : 0
   const buttons = compact ? 32 : 44
-  const footer = 10
+  const footer = 0
   const gaps = [header, 1, metric, states, tires, location, reminder, buttons, footer].filter(value => value > 0).length - 1
   const hero = height - 2 * pad - header - metric - states - tires - location - reminder - buttons - footer - gap * gaps
   return { wide, compact, pad, gap, gaps, header, metric, states, tires, location, reminder, buttons, footer, hero: Math.max(20, hero) }

@@ -21,7 +21,7 @@ import {
 } from 'scripting'
 import { loadCar, sendCommand, readCache, writeCache, type CarData } from './api'
 
-import { readAccountIdentity, currentProviderLabel } from './credentials'
+import { currentProviderLabel } from './credentials'
 import { statusTint } from './vehicle-state'
 import { CommandConfirmation } from './confirmation-screen'
 import { SettingsScreen } from './settings-screen'
@@ -153,7 +153,7 @@ function App() {
 
   async function run(label: string, fn: () => Promise<string>): Promise<void> {
     if (busy) return
-    if (!data || data.accountId !== readAccountIdentity() || readCache()?.machineId !== data.machineId) { setMsg('操作失败：授权或车辆已变化，请刷新车况后重新操作'); return }
+    if (!readCache()?.machineId) { setMsg('请先刷新一次车况'); return }
     setBusy(true)
     setMsg(`${label}中…`)
     try {
