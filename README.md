@@ -2,10 +2,10 @@
 
 适用于 iPhone / iPad 的 Scripting 车辆小组件，当前版本 **3.0.2**。
 
-| 脚本 | 对应服务 | 胎压 | 添加 |
-| --- | --- | --- | --- |
-| [小组件奥智联](./小组件奥智联) | 奥智联（`kds.askdwl.com`） | 不包含 | [添加到 Scripting](https://scripting.fun/import_scripts?urls=%5B%22https%3A%2F%2Fgithub.com%2Femilylakewa%2Fscripting-car-widgets%2Ftree%2Fmain%2F%25E5%25B0%258F%25E7%25BB%2584%25E4%25BB%25B6%25E5%25A5%25A5%25E6%2599%25BA%25E8%2581%2594%22%5D) |
-| [小组件奥捷智行](./小组件奥捷智行) | 奥捷智联（`ck.shjza.cn`） | 接口返回读数时显示四轮胎压 | [添加到 Scripting](https://scripting.fun/import_scripts?urls=%5B%22https%3A%2F%2Fgithub.com%2Femilylakewa%2Fscripting-car-widgets%2Ftree%2Fmain%2F%25E5%25B0%258F%25E7%25BB%2584%25E4%25BB%25B6%25E5%25A5%25A5%25E6%258D%25B7%25E6%2599%25BA%25E8%25A1%258C%22%5D) |
+| 脚本 | 对应服务 | 胎压 | 云端添加 | 安装包 |
+| --- | --- | --- | --- | --- |
+| [小组件奥智联](./小组件奥智联) | 奥智联（`kds.askdwl.com`） | 不包含 | [添加到 Scripting](https://scripting.fun/import_scripts?urls=%5B%22https%3A%2F%2Fgithub.com%2Femilylakewa%2Fscripting-car-widgets%2Ftree%2Fmain%2F%25E5%25B0%258F%25E7%25BB%2584%25E4%25BB%25B6%25E5%25A5%25A5%25E6%2599%25BA%25E8%2581%2594%22%5D)  [下载](https://github.com/emilylakewa/scripting-car-widgets/releases/download/v3.0.2/aozhilian-3.0.2.scripting) |
+| [小组件奥捷智行](./小组件奥捷智行) | 奥捷智联（`ck.shjza.cn`） | 接口返回读数时显示四轮胎压 | [添加到 Scripting](https://scripting.fun/import_scripts?urls=%5B%22https%3A%2F%2Fgithub.com%2Femilylakewa%2Fscripting-car-widgets%2Ftree%2Fmain%2F%25E5%25B0%258F%25E7%25BB%2584%25E4%25BB%25B6%25E5%25A5%25A5%25E6%258D%25B7%25E6%2599%25BA%25E8%25A1%258C%22%5D)  [下载](https://github.com/emilylakewa/scripting-car-widgets/releases/download/v3.0.2/aojie-3.0.2.scripting) |
 
 仓库：[emilylakewa/scripting-car-widgets](https://github.com/emilylakewa/scripting-car-widgets)
 
