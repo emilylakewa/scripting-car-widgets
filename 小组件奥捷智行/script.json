@@ -1,0 +1,28 @@
+{
+  "remoteDefinitionId": null,
+  "name": "小组件奥捷智行",
+  "description": "小组件奥捷智行 · 每个按钮独立二次确认、按钮图标与文字独立配色",
+  "intentInputTypes": [],
+  "color": "#1F3A5F",
+  "icon": "car.fill",
+  "contributors": [],
+  "remoteResource": null,
+  "localizedDescriptions": {
+    "zh": "小组件奥捷智行 · 每个按钮独立二次确认、按钮图标与文字独立配色",
+    "en": "Customizable car widget with user-provided credentials"
+  },
+  "localizedNames": {
+    "zh": "小组件奥捷智行",
+    "en": "小组件奥捷智行"
+  },
+  "version": "3.0.2",
+  "author": {
+    "name": null,
+    "email": null,
+    "homepage": null
+  },
+  "runInApp": false,
+  "iconImage": null,
+  "permissions": null,
+  "entry": "index.tsx"
+}
