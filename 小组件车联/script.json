@@ -1,28 +1,27 @@
 {
-  "remoteDefinitionId": null,
   "name": "小组件车联",
-  "description": "自动识别奥智联与奥捷智行 Token，统一车辆小组件与控车功能",
-  "intentInputTypes": [],
-  "color": "#1F3A5F",
-  "icon": "car.fill",
-  "contributors": [],
-  "remoteResource": null,
-  "localizedDescriptions": {
-    "zh": "自动识别奥智联与奥捷智行 Token，统一车辆小组件与控车功能",
-    "en": "Unified vehicle widget with automatic provider detection"
-  },
-  "localizedNames": {
-    "zh": "小组件车联",
-    "en": "小组件车联"
-  },
-  "version": "3.2.0",
+  "iconImage": "",
   "author": {
     "name": null,
     "email": null,
     "homepage": null
   },
+  "entry": "index.tsx",
+  "color": "#1F3A5F",
+  "version": "3.3.4",
+  "description": "自动识别奥智联与奥捷智行，支持独立车门和尾门状态及自定义车图大小",
+  "intentInputTypes": [],
+  "contributors": [],
+  "remoteResource": null,
+  "localizedNames": {
+    "zh": "小组件车联",
+    "en": "CarLink"
+  },
+  "localizedDescriptions": {
+    "zh": "自动识别奥智联与奥捷智行 Token，统一车辆小组件与控车功能",
+    "en": "Unified vehicle widget with automatic provider detection"
+  },
   "runInApp": false,
-  "iconImage": null,
-  "permissions": null,
-  "entry": "index.tsx"
+  "icon": "car.fill",
+  "permissions": null
 }

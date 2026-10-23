@@ -11,9 +11,14 @@ export type WidgetOptions = {
   infoBackgroundTransparency: number | null
   infoBackgroundColor: string; extraLargeBackground: string
   fontScale: number; updateTimeStyle: 'absolute' | 'relative'
-  buttonConfirmations: boolean[]; buttonIconColor: string
-  fontColor: string; buttonBackgroundColor: string; buttonTextColor: string
+  buttonConfirmations: boolean[]
+  buttonIconOnColor: string; buttonIconOffColor: string; buttonHeight: number
+  fontColor: string; buttonBackgroundColor: string
   carScale: number; backgroundDim: number; buttonCount: number; buttons: string[]
+  barWidth: number; barHeight: number
+  buttonRadius: number
+  useAudiLogo: boolean; showCenterAddress: boolean; hideLocationRow: boolean
+  centerCarScale: number
   smallStyle: string; smallRingInfo: string; lastButton: string; refreshMinutes: number; autoRefresh: boolean
   carImage: string; smallBackground: string; mediumBackground: string; largeBackground: string
   maintenanceDate: string; insuranceDate: string; inspectionDate: string; maintenanceKm: string
@@ -29,9 +34,13 @@ export const DEFAULTS: Settings = {
   infoBackgroundTransparency: null,
   infoBackgroundColor: '', extraLargeBackground: '',
   fontScale: 100, updateTimeStyle: 'absolute',
-  buttonConfirmations: [false, false, false, false], buttonIconColor: '',
-  fontColor: '', buttonBackgroundColor: '', buttonTextColor: '',
-  carScale: 100, backgroundDim: 0, buttonCount: 4, buttons: ['refresh', 'lock', 'window', 'engine'],
+  buttonConfirmations: [false, false, false, false, false, false],
+  buttonIconOnColor: '', buttonIconOffColor: '', buttonHeight: 31,
+  fontColor: '', buttonBackgroundColor: '',
+  carScale: 100, backgroundDim: 0, buttonCount: 6, buttons: ['refresh', 'lock', 'window', 'engine', 'find', 'ac'],
+  barWidth: 94, barHeight: 3,
+  buttonRadius: -1,
+  useAudiLogo: true, showCenterAddress: true, hideLocationRow: false, centerCarScale: 100,
   smallStyle: 'classic', smallRingInfo: 'oil', lastButton: 'engine', refreshMinutes: 30, autoRefresh: true,
   carImage: '', smallBackground: '', mediumBackground: '', largeBackground: '',
   maintenanceDate: '', insuranceDate: '', inspectionDate: '', maintenanceKm: '',
@@ -49,18 +58,31 @@ function normalizeSettings(saved: Partial<Settings>): Settings {
   settings.fontColor = normalizeColor(settings.fontColor)
   settings.buttonBackgroundColor = normalizeColor(settings.buttonBackgroundColor, true)
   settings.buttonBackgroundTransparency = typeof settings.buttonBackgroundTransparency === 'number' && Number.isFinite(settings.buttonBackgroundTransparency) ? bounded(settings.buttonBackgroundTransparency, 0, 100, 0) : null
-  settings.buttonTextColor = normalizeColor(settings.buttonTextColor)
-  settings.buttonIconColor = normalizeColor(Object.prototype.hasOwnProperty.call(saved, 'buttonIconColor') ? saved.buttonIconColor : saved.buttonTextColor)
+  settings.buttonIconOnColor = normalizeColor(settings.buttonIconOnColor)
+  settings.buttonIconOffColor = normalizeColor(settings.buttonIconOffColor)
+  // 下面各数值的上/下限与设置页“自定义数值”的可输入范围保持一致，否则自定义值会被静默夹回。
+  settings.buttonHeight = Math.round(bounded(settings.buttonHeight, 14, 80, 31))
+  settings.useAudiLogo = typeof settings.useAudiLogo === 'boolean' ? settings.useAudiLogo : DEFAULTS.useAudiLogo
+  settings.showCenterAddress = typeof settings.showCenterAddress === 'boolean' ? settings.showCenterAddress : true
+  settings.centerCarScale = Math.round(bounded(settings.centerCarScale, 30, 300, 100))
   settings.buttonConfirmations = DEFAULTS.buttons.map((_, i) => Array.isArray(saved.buttonConfirmations) && saved.buttonConfirmations[i] === true)
-  settings.fontScale = bounded(settings.fontScale, 80, 120, 100)
+  settings.fontScale = bounded(settings.fontScale, 60, 200, 100)
   settings.updateTimeStyle = settings.updateTimeStyle === 'relative' ? 'relative' : 'absolute'
-  settings.carScale = bounded(settings.carScale, 60, 160, 100)
-  settings.buttonCount = Math.round(bounded(settings.buttonCount, 1, 4, 4))
+  settings.carScale = bounded(settings.carScale, 30, 300, 100)
+  settings.barWidth = Math.round(bounded(settings.barWidth, 20, 400, DEFAULTS.barWidth))
+  settings.barHeight = Math.round(bounded(settings.barHeight, 1, 40, DEFAULTS.barHeight))
+  settings.buttonRadius = Math.round(bounded(settings.buttonRadius, -1, 60, DEFAULTS.buttonRadius))
+  const slotCount = DEFAULTS.buttons.length
+  settings.buttonCount = Math.round(bounded(settings.buttonCount, 1, slotCount, slotCount))
+  // 旧版本只存了 5 个按钮槽位，升级后自动扩到 6 个；在设置里保存过一次就不再强制
+  if (!Array.isArray(saved.buttons) || saved.buttons.length < slotCount) settings.buttonCount = slotCount
   settings.smallRingInfo = INFO_OPTIONS.some(option => option.id === settings.smallRingInfo) ? settings.smallRingInfo : 'oil'
-  settings.backgroundDim = bounded(settings.backgroundDim, 0, 70, 0)
-  const buttons = Array.isArray(saved.buttons) ? saved.buttons : ['refresh', 'lock', 'window', saved.lastButton || 'engine']
+  settings.backgroundDim = bounded(settings.backgroundDim, 0, 100, 0)
+  settings.refreshMinutes = Math.round(bounded(settings.refreshMinutes, 5, 1440, DEFAULTS.refreshMinutes))
+  const buttons = Array.isArray(saved.buttons) ? saved.buttons : ['refresh', 'lock', 'window', saved.lastButton || 'engine', 'find']
   settings.buttons = DEFAULTS.buttons.map((fallback, i) => ACTIONS.some(a => a.id === buttons[i]) ? buttons[i] : fallback)
-  for (const key of ['showMetrics', 'showStates', 'showTires', 'showLocationCard', 'showReminders'] as const) {
+  // hideLocationRow：开启后地址/短句整行不渲染，优先级高于 showAddress 与 showLocationCard。
+  for (const key of ['showMetrics', 'showStates', 'showTires', 'showLocationCard', 'showReminders', 'hideLocationRow'] as const) {
     settings[key] = typeof settings[key] === 'boolean' ? settings[key] : DEFAULTS[key]
   }
   for (const key of ['metricSlots', 'stateSlots'] as const) {
@@ -75,95 +97,33 @@ export const ACTIONS = [
   { id: 'window', name: '开窗 / 关窗' }, { id: 'engine', name: '启动 / 熄火' },
   { id: 'find', name: '鸣笛寻车' }, { id: 'cool', name: '冷车 30 分钟' },
   { id: 'hot', name: '热车 30 分钟' }, { id: 'ac', name: '空调开启 / 关闭' },
-  { id: 'trunk', name: '打开尾门' },
+  { id: 'trunk', name: '打开尾门 / 关闭尾门' },
 ]
+// 可放进组件的指标/状态/胎压候选项，与 dashboard-model 的 itemById 一一对应。
 export const INFO_OPTIONS = [
-  {
-    "id": "blank",
-    "name": "不显示"
-  },
-  {
-    "id": "mileage",
-    "name": "累计里程"
-  },
-  {
-    "id": "oil",
-    "name": "剩余油量"
-  },
-  {
-    "id": "fuelPct",
-    "name": "燃油余量"
-  },
-  {
-    "id": "battery",
-    "name": "蓄电池"
-  },
-  {
-    "id": "outsideTemp",
-    "name": "车外温度"
-  },
-  {
-    "id": "locked",
-    "name": "车锁状态"
-  },
-  {
-    "id": "engineOn",
-    "name": "发动机状态"
-  },
-  {
-    "id": "online",
-    "name": "在线状态"
-  },
-  {
-    "id": "windows",
-    "name": "车窗"
-  },
-  {
-    "id": "carDoor",
-    "name": "车门"
-  },
-  {
-    "id": "carLamp",
-    "name": "车灯"
-  },
-  {
-    "id": "acOn",
-    "name": "空调"
-  },
-  {
-    "id": "waterTemperature",
-    "name": "水温"
-  },
-  {
-    "id": "heatSeat",
-    "name": "座椅加热"
-  },
-  {
-    "id": "tireLF",
-    "name": "左前胎压"
-  },
-  {
-    "id": "tireRF",
-    "name": "右前胎压"
-  },
-  {
-    "id": "tireLR",
-    "name": "左后胎压"
-  },
-  {
-    "id": "tireRR",
-    "name": "右后胎压"
-  }
+  { id: 'blank', name: '不显示' },
+  { id: 'mileage', name: '累计里程' }, { id: 'oil', name: '剩余油量' },
+  { id: 'fuelPct', name: '燃油余量' }, { id: 'battery', name: '蓄电池' },
+  { id: 'outsideTemp', name: '车外温度' }, { id: 'locked', name: '车锁状态' },
+  { id: 'engineOn', name: '发动机状态' }, { id: 'online', name: '在线状态' },
+  { id: 'windows', name: '车窗' }, { id: 'carDoor', name: '车门' },
+  { id: 'trunkStatus', name: '尾门状态' }, { id: 'hoodStatus', name: '车盖状态' },
+  { id: 'carLamp', name: '车灯' }, { id: 'acOn', name: '空调' },
+  { id: 'waterTemperature', name: '水温' }, { id: 'heatSeat', name: '座椅加热' },
+  { id: 'tireLF', name: '左前胎压' }, { id: 'tireRF', name: '右前胎压' },
+  { id: 'tireLR', name: '左后胎压' }, { id: 'tireRR', name: '右后胎压' },
 ]
 export const WIDGET_SIZES: { id: WidgetSize; name: string }[] = [
   { id: 'small', name: '小号组件' }, { id: 'medium', name: '中号组件' },
   { id: 'large', name: '大号组件' }, { id: 'extraLarge', name: '超大号组件' },
 ]
 const PROFILE_KEYS = [
-  'theme', 'name', 'plate', 'showPlate', 'showAddress', 'quote', 'showIcons', 'showTemp',
+  'theme', 'name', 'plate', 'showPlate', 'showAddress', 'hideLocationRow', 'quote', 'showIcons', 'showTemp',
   'fontScale', 'fontColor', 'infoBackgroundColor', 'infoBackgroundTransparency',
-  'buttonBackgroundColor', 'buttonBackgroundTransparency', 'buttonTextColor', 'buttonIconColor', 'buttonConfirmations',
-  'carScale', 'backgroundDim', 'buttonCount', 'buttons', 'smallStyle', 'smallRingInfo', 'lastButton',
+  'buttonBackgroundColor', 'buttonBackgroundTransparency', 'buttonConfirmations',
+  // useAudiLogo 只影响车辆中心主页，已移入根级设置，不再按尺寸保存。
+  'buttonIconOnColor', 'buttonIconOffColor', 'buttonHeight', 'buttonRadius',
+  'carScale', 'barWidth', 'barHeight', 'backgroundDim', 'buttonCount', 'buttons', 'smallStyle', 'smallRingInfo', 'lastButton',
   'refreshMinutes', 'autoRefresh', 'updateTimeStyle', 'carImage', 'smallBackground',
   'mediumBackground', 'largeBackground', 'extraLargeBackground', 'metricSlots', 'stateSlots',
   'showMetrics', 'showStates', 'showTires', 'showLocationCard', 'showReminders',
@@ -175,12 +135,10 @@ function profileOnly(value: unknown): Partial<WidgetOptions> {
 }
 export function settingsForSize(root: Settings, size: WidgetSize): Settings {
   const profile = profileOnly(root.profiles?.[size])
-  if (Object.prototype.hasOwnProperty.call(profile, 'buttonTextColor') && !Object.prototype.hasOwnProperty.call(profile, 'buttonIconColor')) profile.buttonIconColor = normalizeColor(profile.buttonTextColor)
   return normalizeSettings({ ...root, ...profile })
 }
 export function withWidgetSettings(root: Settings, size: WidgetSize, patch: Partial<WidgetOptions>): Settings {
   const previous = profileOnly(root.profiles?.[size])
-  if (Object.prototype.hasOwnProperty.call(patch, 'buttonTextColor') && !Object.prototype.hasOwnProperty.call(previous, 'buttonIconColor')) previous.buttonIconColor = settingsForSize(root, size).buttonIconColor
   return { ...root, profiles: { ...root.profiles, [size]: { ...previous, ...profileOnly(patch) } } }
 }
 export function withoutWidgetSettings(root: Settings, size: WidgetSize): Settings {
@@ -196,9 +154,27 @@ export function widgetSizeFor(family: string, width: number, height: number): Wi
 function bounded(value: unknown, min: number, max: number, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) ? Math.max(min, Math.min(max, value)) : fallback
 }
-export function visibleButtons(s: Settings): string[] { return s.buttons.slice(0, Math.round(bounded(s.buttonCount, 1, 4, 4))) }
-export function carScaleOf(s: Settings): number { return bounded(s.carScale, 60, 160, 100) / 100 }
-export function backgroundDimOf(s: Settings): number { return bounded(s.backgroundDim, 0, 70, 0) / 100 }
+export function visibleButtons(s: Settings): string[] { return s.buttons.slice(0, Math.round(bounded(s.buttonCount, 1, DEFAULTS.buttons.length, DEFAULTS.buttons.length))) }
+export function buttonHeightOf(s: Settings): number { return Math.round(bounded(s.buttonHeight, 14, 80, 31)) }
+// 控制按钮圆角：-1 表示随高度自动（原有观感），其余按设定值，最大不超过高度的一半。
+export function buttonRadiusOf(s: Settings, height: number, autoMax = 10): number {
+  const value = Math.round(bounded(s.buttonRadius, -1, 60, DEFAULTS.buttonRadius))
+  return value < 0 ? Math.min(autoMax, height / 3) : Math.min(value, height / 2)
+}
+export function useAudiLogoOf(s: Settings): boolean { return s.useAudiLogo !== false }
+// 车辆中心页面的位置卡片开关：全局生效（不分尺寸），默认显示。
+export function centerAddressOf(s: Settings): boolean { return s.showCenterAddress !== false }
+export function carScaleOf(s: Settings): number { return bounded(s.carScale, 30, 300, 100) / 100 }
+// 车辆中心中卡片的车辆大小：独立设置，不跟任何尺寸的“车图大小”联动。
+export function centerCarScaleOf(s: Settings): number { return bounded(s.centerCarScale, 30, 300, 100) / 100 }
+// 组件里的油量/电量进度条：长宽都可自定义，长度不超过内容宽度。
+export function barSizeOf(s: Settings) {
+  return {
+    width: Math.round(bounded(s.barWidth, 20, 400, DEFAULTS.barWidth)),
+    height: Math.round(bounded(s.barHeight, 1, 40, DEFAULTS.barHeight)),
+  }
+}
+export function backgroundDimOf(s: Settings): number { return bounded(s.backgroundDim, 0, 100, 0) / 100 }
 export const COLOR_PRESETS = [
   { value: '', name: '默认颜色' }, { value: '#FFFFFF', name: '白色' },
   { value: '#111827', name: '黑色' }, { value: '#94A3B8', name: '灰色' },
@@ -214,12 +190,12 @@ export function normalizeColor(value: unknown, allowClear = false): string {
   if (/^#[0-9a-f]{3}$/i.test(color)) return '#' + color.slice(1).split('').map(v => v + v).join('').toUpperCase()
   return ''
 }
-export function fontSizeOf(s: Settings, base: number): number { return Math.round(base * bounded(s.fontScale, 80, 120, 100)) / 100 }
+export function fontSizeOf(s: Settings, base: number): number { return Math.round(base * bounded(s.fontScale, 60, 200, 100)) / 100 }
 export function fontColorOf(s: Settings, fallback: string): string { return normalizeColor(s.fontColor) || fallback }
 function backgroundWithTransparency(value: string, transparency: number | null, fallbackRGB: number[], fallbackAlpha: number): string {
   const color = normalizeColor(value, true)
   if (color === 'clear') return 'clear'
-  // Older settings keep the original fill until a transparency is selected.
+  // 旧配置没选过透明度时，沿用原始填充色。
   if (typeof transparency !== 'number' || !Number.isFinite(transparency)) return color || 'rgba(' + fallbackRGB.join(',') + ',' + fallbackAlpha + ')'
   const alpha = Math.round(100 - bounded(transparency, 0, 100, 0)) / 100
   if (alpha === 0) return 'clear'
@@ -233,8 +209,10 @@ export function infoBackgroundOf(s: Settings): string {
 export function buttonBackgroundOf(s: Settings): string {
   return backgroundWithTransparency(s.buttonBackgroundColor, s.buttonBackgroundTransparency, [2, 7, 18], 0.72)
 }
-export function buttonIconOf(s: Settings, fallback: string): string { return normalizeColor(s.buttonIconColor) || fallback }
-export function buttonTextOf(s: Settings, fallback: string): string { return normalizeColor(s.buttonTextColor) || fallback }
+// 图标颜色只有「激活 / 未激活」两档，都留空时退回各按钮的原色。
+export function buttonIconColorOf(s: Settings, active: boolean, fallback: string): string {
+  return normalizeColor(active ? s.buttonIconOnColor : s.buttonIconOffColor) || fallback
+}
 export function saveSettings(value: Settings): void {
   if (Storage.set(KEY, value) === false) throw new Error('设置保存失败，请重试')
 }

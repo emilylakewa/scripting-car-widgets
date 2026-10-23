@@ -65,7 +65,6 @@ export function updateText(timestamp: number, now = Date.now(), style: 'absolute
   return '更新于 ' + (sameDay ? '' : year + day + ' ') + time
 }
 
-
 const AMAP_KEY = 'CarLink.AMap.WebService.' + Script.name
 export function readAMapKey(): string {
   return String(Keychain.get(AMAP_KEY) || '').trim()

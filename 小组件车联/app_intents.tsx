@@ -1,30 +1,21 @@
 import { AppIntentManager, AppIntentProtocol, Widget } from 'scripting'
 import { beginWidgetConfirmation, cancelWidgetConfirmation, submitWidgetConfirmation, type StartConfirmation } from './widget-confirmation'
-import { parseControlRequest, requestedCommand } from './command-confirmation'
-
-import { loadCar, patchCache, readCache, sendCommand, writeCache } from './api'
+import { readCache } from './api'
+import { trunkOpen } from './vehicle-state'
+import { parseControlRequest, performControlAction } from './command-confirmation'
 
 type Binding = { accountId: string; machineId: string; size: string }
+// 所有组件控车意图共用的入口：解析参数 → 交给统一执行核心（乐观状态、失败回滚都它做）。
 async function execute(action: string, target: boolean, parameters: Binding): Promise<void> {
   try {
     const request = parseControlRequest({ confirmAction: action, confirmTarget: target ? '1' : '0',
       confirmVehicle: parameters?.machineId, confirmSize: parameters?.size, confirmAccount: parameters?.accountId })
     if (!request) throw new Error('组件操作已失效，请刷新后重试')
-    const previous = readCache()
-    if (action === 'refresh') {
-      const fresh = await loadCar()
-      writeCache(fresh)
-      return
-    }
-    const command = requestedCommand(request)
-    // 3.0.2: direct buttons update their snapshot first, then send immediately.
-    if (command.patch) { patchCache(command.patch); Widget.reloadAll() }
-    try { await sendCommand(command.command, command.data, command.raw) }
-    catch (e) {
-      if (command.patch && previous) writeCache(previous)
-      throw e
-    }
-  } finally { Widget.reloadAll() }
+    await performControlAction(request)
+  } finally {
+    // 无论成功失败都重绘一次，让组件显示最终状态。
+    Widget.reloadAll()
+  }
 }
 
 export const LockIntent = AppIntentManager.register({
@@ -82,8 +73,9 @@ export const FindIntent = AppIntentManager.register({
 
 export const TrunkIntent = AppIntentManager.register({
   name: 'CarLinkCarTrunk', protocol: AppIntentProtocol.AppIntent,
-  perform: async (parameters: Binding) => {
-    await execute('trunk', false, parameters)
+  perform: async (parameters: Binding & { open?: boolean }) => {
+    const open = typeof parameters.open === 'boolean' ? parameters.open : !trunkOpen(readCache())
+    await execute('trunk', open, parameters)
   },
 })
 

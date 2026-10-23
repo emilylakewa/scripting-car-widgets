@@ -12,18 +12,27 @@ import {
   Button,
   Link,
   Script,
-  Path,
 } from 'scripting'
 import { loadCar, writeCache, readCache, type CarData } from './api'
 import { BeginConfirmationIntent, CancelConfirmationIntent, SubmitConfirmationIntent, ACIntent, TrunkIntent, CoolIntent, HotIntent, FindIntent, EngineIntent, LockIntent, RefreshIntent, WindowIntent } from './app_intents'
 
-import { readSettings, settingsForSize, widgetSizeFor, infoBackgroundOf, visibleButtons, fontSizeOf, fontColorOf, buttonBackgroundOf, buttonTextOf, buttonIconOf, carScaleOf, backgroundDimOf, imagePath, gradientOf, plateText, reminderLines, themeOf } from './settings'
+import { readSettings, settingsForSize, widgetSizeFor, infoBackgroundOf, visibleButtons, fontSizeOf, fontColorOf, buttonBackgroundOf, buttonHeightOf, buttonIconColorOf, carScaleOf, backgroundDimOf, barSizeOf, buttonRadiusOf, imagePath, gradientOf, plateText, reminderLines, themeOf } from './settings'
+import { buttonIconSVG } from './button-icons'
 import { updateText, supportsTires } from './credentials'
 import { readWidgetConfirmation, recentlyFinishedConfirmation, type WidgetConfirmation } from './widget-confirmation'
 import { requestedCommand } from './command-confirmation'
-import { statusTint } from './vehicle-state'
-import { dashboardLayout, isDashboardFamily, known, metricItems, stateItems, tireItems, dashboardAttention, parkingText, engineText } from './dashboard-model'
-const widgetSize = widgetSizeFor(String(Widget.family), displaySize().width, displaySize().height)
+import { statusTint, trunkOpen, bodyWarnings } from './vehicle-state'
+import { dashboardLayout, known, bits, anyBitSet, metricItems, stateItems, tireItems, dashboardAttention, parkingText, engineText } from './dashboard-model'
+// Widget.displaySize 在一次渲染内是常量，读一次缓存起来，
+// 避免各个分区反复访问原生属性、也避免多处的默认值分叉。
+const DISPLAY = (() => {
+  const s: any = Widget.displaySize
+  return { width: s?.width || 338, height: s?.height || 158 }
+})()
+function displaySize() {
+  return DISPLAY
+}
+const widgetSize = widgetSizeFor(String(Widget.family), DISPLAY.width, DISPLAY.height)
 const settings = settingsForSize(readSettings(), widgetSize)
 const BUTTONS = visibleButtons(settings)
 let CAR_IMAGE_PATH = imagePath(settings)
@@ -31,11 +40,7 @@ const OPEN_URL = Script.createRunSingleURLScheme(Script.name)
 const NEXT_RELOAD = new Date(Date.now() + settings.refreshMinutes * 60 * 1000)
 const BG = 'clear'
 const accent = themeOf(settings).accent
-
-function displaySize() {
-  const s: any = Widget.displaySize
-  return { width: s?.width || 338, height: s?.height || 158 }
-}
+const BUTTON_H = buttonHeightOf(settings)
 
 function title(d: CarData): string {
   return settings.name.trim() || d.model || d.plate || '我的座驾'
@@ -48,9 +53,10 @@ function statsText(d: CarData): string {
   return `${km}  ·  ${oil}  ·  ${volt}`
 }
 
+// 小尺寸卡片的状态行：字段没上报时明说“未知”，不要把默认 false 说成“未锁车 / 已熄火”。
 function stateText(d: CarData): string {
-  const lock = d.locked ? '已锁车' : '未锁车'
-  const engine = d.engineOn ? '发动机运行' : '已熄火'
+  const lock = known(d, 'locked') ? d.locked ? '已锁车' : '未锁车' : '车锁未知'
+  const engine = known(d, 'engineOn') ? d.engineOn ? '发动机运行' : '已熄火' : '启动未知'
   return `${lock} · ${engine}`
 }
 
@@ -61,20 +67,26 @@ function addressText(d: CarData): string {
 function windowsOpen(d: CarData): boolean {
   return Array.isArray(d.windows) && d.windows.some(v => v !== 0)
 }
-
 type WarningItem = { icon: string; label: string; tint: string }
 
 function warningItems(d: CarData): WarningItem[] {
   const items: WarningItem[] = []
-  if (String(d.carLamp || '').includes('1')) items.push({ icon: 'headlight.low.beam.fill', label: '车灯未关', tint: '#FBBF24' })
-  if (String(d.carDoor || '').includes('1')) items.push({ icon: 'car.side.front.open.fill', label: '车门未关', tint: '#FB923C' })
-  if (windowsOpen(d)) items.push({ icon: 'rectangle.split.3x1', label: '车窗未关', tint: '#38BDF8' })
-  if (String(d.heatSeat || '').split(',').some(v => Number(v) > 0)) items.push({ icon: 'seat.heat', label: '座椅加热', tint: '#F97316' })
-  if (d.waterTemperature > 110 && d.engineOn) items.push({ icon: 'thermometer.and.liquid.waves', label: '水温偏高', tint: '#F87171' })
-  if (d.fuelPct > 0 && d.fuelPct < 10) items.push({ icon: 'fuelpump.fill', label: '油量过低', tint: '#FBBF24' })
-  if (d.battery > 0 && d.battery < 11.8) items.push({ icon: 'minus.plus.batteryblock.fill', label: '电压偏低', tint: '#F87171' })
-  if (!d.locked) items.push({ icon: 'lock.open.fill', label: '车辆未锁', tint: '#FB923C' })
+  // 位图字段统一解析：原来的 includes('1') 会把 10、12 这类数值误判成“已开启”。
+  if (known(d, 'carLamp') && anyBitSet(d.carLamp)) items.push({ icon: 'headlight.low.beam.fill', label: '车灯未关', tint: '#FBBF24' })
+  items.push(...bodyWarnings(d))
+  if (known(d, 'windows') && windowsOpen(d)) items.push({ icon: 'rectangle.split.3x1', label: '车窗未关', tint: '#38BDF8' })
+  if (known(d, 'heatSeat') && anyBitSet(d.heatSeat)) items.push({ icon: 'seat.heat', label: '座椅加热', tint: '#F97316' })
+  if (known(d, 'waterTemperature') && d.waterTemperature > 110 && d.engineOn) items.push({ icon: 'thermometer.and.liquid.waves', label: '水温偏高', tint: '#F87171' })
+  if (known(d, 'fuelPct') && d.fuelPct > 0 && d.fuelPct < 10) items.push({ icon: 'fuelpump.fill', label: '油量过低', tint: '#FBBF24' })
+  if (known(d, 'battery') && d.battery > 0 && d.battery < 11.8) items.push({ icon: 'minus.plus.batteryblock.fill', label: '电压偏低', tint: '#F87171' })
+  if (known(d, 'locked') && !d.locked) items.push({ icon: 'lock.open.fill', label: '车辆未锁', tint: '#FB923C' })
   return items
+}
+
+function warningIcon(item: WarningItem, size: number) {
+  return item.icon === 'door' || item.icon === 'trunk'
+    ? <SVG code={buttonIconSVG(item.icon, true, item.tint)} resizable renderingMode="original" frame={{ width: size, height: size }} />
+    : <Image systemName={item.icon} resizable scaleToFit foregroundStyle={item.tint} frame={{ width: size, height: size }} />
 }
 
 function warningRow(items: WarningItem[], compact = false) {
@@ -84,7 +96,7 @@ function warningRow(items: WarningItem[], compact = false) {
     <HStack spacing={compact ? 5 : 7} padding={{ top: compact ? 2 : 4 }} frame={{ maxWidth: 'infinity', alignment: 'leading' }}>
       {visible.map(item => (
         <HStack spacing={2} key={item.label}>
-          <Image systemName={item.icon} resizable scaleToFit foregroundStyle={item.tint} frame={{ width: compact ? 9 : 12, height: compact ? 9 : 12 }} />
+          {warningIcon(item, compact ? 9 : 12)}
           {!compact && items.length === 1 ? <Text font={fontSizeOf(settings, 8.5)} foregroundStyle={item.tint} lineLimit={1}>{item.label}</Text> : null}
         </HStack>
       ))}
@@ -92,12 +104,20 @@ function warningRow(items: WarningItem[], compact = false) {
   )
 }
 
-function fuelBar(d: CarData, width: number) {
-  const pct = Math.max(0.025, Math.min(1, d.fuelPct / 100))
+// 同步判断文件是否存在：渲染前只需一次本地查证，同步版本可省掉两次 async 往返。
+function fileExists(path: string): boolean {
+  try { return !!FileManager.existsSync(path) } catch { return false }
+}
+
+function fuelBar(d: CarData, width: number, height: number) {
+  // fuelPct 可能缺失或非法（NaN）：先归一化，避免 NaN 传到 Capsule 宽度。
+  const raw = Number.isFinite(d.fuelPct) ? d.fuelPct : 0
+  const pct = Math.max(0.025, Math.min(1, raw / 100))
+  const w = Math.max(8, width), h = Math.max(2, height)
   return (
-    <ZStack alignment="leading" frame={{ width, height: 3 }}>
-      <Capsule fill="rgba(255,255,255,0.18)" frame={{ width, height: 3 }} />
-      <Capsule fill="#5CD98F" frame={{ width: width * pct, height: 3 }} />
+    <ZStack alignment="leading" frame={{ width: w, height: h }}>
+      <Capsule fill="rgba(255,255,255,0.18)" frame={{ width: w, height: h }} />
+      <Capsule fill="#5CD98F" frame={{ width: w * pct, height: h }} />
     </ZStack>
   )
 }
@@ -105,75 +125,99 @@ function fuelBar(d: CarData, width: number) {
 function ControlButton({ intent, confirmationIntent, frame, children }: { intent: any; confirmationIntent?: any; frame: any; children: any }) {
   return <Button intent={confirmationIntent || intent} buttonStyle="plain" frame={frame}>{children}</Button>
 }
-function mediumButton(width: number, system: string, label: string, intent: any, tint: string, confirmationIntent?: any) {
+function iconSizeOf(height: number, width: number) { return Math.round(Math.min(20, Math.max(11, Math.min(height * 0.6, width - 9)))) }
+// 图标取色语义：true 用「图标激活状态颜色」。
+// 图标形状始终按真实状态画（state），只有颜色按按钮当前的动作方向走：
+// 一键类动作（寻车 / 刷新 / 冷车 / 热车）没有开关两态，固定用激活色；
+// 启动 / 开窗 / 开尾门 也是「去开启」类动作，所以待执行时亮起、执行完转暗；锁车、空调按实际开关取色。
+function iconActive(id: string, state: boolean): boolean {
+  switch (id) {
+    case 'engine':
+    case 'window':
+    case 'trunk': return !state
+    case 'find':
+    case 'refresh':
+    case 'cool':
+    case 'hot': return true
+    default: return state
+  }
+}
+function actionIcon(id: string, state: boolean, tint: string, size: number) {
+  return <SVG code={buttonIconSVG(id, state, buttonIconColorOf(settings, iconActive(id, state), tint))} resizable renderingMode="original" frame={{ width: size, height: size }} />
+}
+// 车辆图片：组件里始终显示所选车辆照片（奥迪 Logo 只用在车辆中心主页）。
+function carMark(width: number, height: number, offsetY = 0) {
+  return <Image filePath={CAR_IMAGE_PATH} resizable scaleToFit frame={{ width, height }} offset={{ x: 0, y: offsetY }} shadow={{ color: 'rgba(0,0,0,0.34)', radius: 4, x: 0, y: 2 }} />
+}
+// 车辆图片：点一下直接更新车况（刷新），不跳转
+function refreshTap(d: CarData, children: any) {
+  return <Button intent={RefreshIntent({ accountId: d.accountId, machineId: d.machineId, size: widgetSize })} buttonStyle="plain">{children}</Button>
+}
+// 除车辆图片以外的区域：正常跳转进 App 的车辆中心页面
+function tapToApp(children: any) {
+  return <Link url={OPEN_URL}>{children}</Link>
+}
+// 小 / 中尺寸共用的底部控制按钮（原来 mediumButton 与 smallButton 完全相同，已合并）。
+function controlButton(width: number, id: string, state: boolean, intent: any, tint: string, confirmationIntent?: any) {
+  const height = BUTTON_H
   return (
-    <ControlButton intent={intent} confirmationIntent={confirmationIntent} frame={{ width, height: 31 }}>
-      <ZStack frame={{ width, height: 31 }}>
-        <RoundedRectangle cornerRadius={10} fill={buttonBackgroundOf(settings)} frame={{ width, height: 31 }} />
-        <HStack spacing={7}>
-          <Image systemName={system} resizable scaleToFit foregroundStyle={buttonIconOf(settings, tint)} frame={{ width: 12, height: 12 }} />
-          <Text font={fontSizeOf(settings, 9.5)} fontWeight="medium" foregroundStyle={buttonTextOf(settings, 'rgba(255,255,255,0.94)')} lineLimit={1}>{label}</Text>
-        </HStack>
+    <ControlButton intent={intent} confirmationIntent={confirmationIntent} frame={{ width, height }}>
+      <ZStack frame={{ width, height }}>
+        <RoundedRectangle cornerRadius={buttonRadiusOf(settings, height)} fill={buttonBackgroundOf(settings)} frame={{ width, height }} />
+        {actionIcon(id, state, tint, iconSizeOf(height, width))}
       </ZStack>
     </ControlButton>
   )
 }
 
-function smallButton(width: number, system: string, intent: any, tint: string, confirmationIntent?: any) {
-  return (
-    <ControlButton intent={intent} confirmationIntent={confirmationIntent} frame={{ width, height: 30 }}>
-      <ZStack frame={{ width, height: 30 }}>
-        <RoundedRectangle cornerRadius={10} fill={buttonBackgroundOf(settings)} frame={{ width, height: 30 }} />
-        <Image systemName={system} resizable scaleToFit foregroundStyle={buttonIconOf(settings, tint)} frame={{ width: 13, height: 13 }} />
-      </ZStack>
-    </ControlButton>
-  )
-}
 
 function mediumBody(d: CarData) {
   const widgetWidth = displaySize().width
-  const buttonWidth = (widgetWidth - 26 - 6 * (BUTTONS.length - 1)) / BUTTONS.length
+  const buttonGap = BUTTONS.length >= 6 ? 5 : 6
+  const buttonWidth = (widgetWidth - 26 - buttonGap * (BUTTONS.length - 1)) / BUTTONS.length
   const scale = carScaleOf(settings)
   const carWidth = Math.min(104 * scale, widgetWidth * 0.43)
   const contentWidth = widgetWidth - 26 - carWidth - 8
+  const bar = barSizeOf(settings)
+  const barWidth = Math.min(bar.width, contentWidth)
   const warnings = warningItems(d)
   return (
     <VStack alignment="leading" spacing={0} padding={{ horizontal: 13, top: 12, bottom: 10 }} background={BG} frame={{ maxWidth: 'infinity', maxHeight: 'infinity' }}>
-      <Link url={OPEN_URL}>
-        <HStack alignment="top" spacing={8} frame={{ maxWidth: 'infinity', alignment: 'leading' }}>
+      <HStack alignment="top" spacing={8} frame={{ maxWidth: 'infinity', alignment: 'leading' }}>
+        {tapToApp(
           <VStack alignment="leading" spacing={4} frame={{ width: contentWidth, alignment: 'leading' }}>
             <HStack spacing={8} frame={{ width: contentWidth, alignment: 'leading' }}>
               <Text font={fontSizeOf(settings, 19)} fontWeight="bold" foregroundStyle={fontColorOf(settings, 'white')} lineLimit={1} minScaleFactor={0.72}>{title(d)}</Text>
               <Text font={fontSizeOf(settings, 9)} foregroundStyle={fontColorOf(settings, 'rgba(255,255,255,0.58)')} lineLimit={1}>{plateText(d, settings)}</Text>
             </HStack>
-            <Text font={fontSizeOf(settings, 10)} foregroundStyle={fontColorOf(settings, 'rgba(255,255,255,0.9)')} lineLimit={1} minScaleFactor={0.8}>{addressText(d)}</Text>
+            {settings.hideLocationRow ? null : <Text font={fontSizeOf(settings, 10)} foregroundStyle={fontColorOf(settings, 'rgba(255,255,255,0.9)')} lineLimit={1} minScaleFactor={0.8}>{addressText(d)}</Text>}
             <Text font={fontSizeOf(settings, 11)} fontWeight="semibold" foregroundStyle={fontColorOf(settings, 'rgba(255,255,255,0.98)')} lineLimit={1} minScaleFactor={0.7}>{statsText(d)}</Text>
-            <HStack padding={{ top: 1 }}>
-              {fuelBar(d, 94)}
+            <HStack padding={{ top: Math.max(1, Math.round((bar.height - 3) / 2)) }}>
+              {fuelBar(d, barWidth, bar.height)}
             </HStack>
             <Text font={fontSizeOf(settings, 9.5)} fontWeight="medium" foregroundStyle={statusTint(d, d.online ? fontColorOf(settings, 'rgba(255,255,255,0.7)') : '#FCA5A5')} lineLimit={1}>{stateText(d)}</Text>
             {warningRow(warnings)}
           </VStack>
-          <VStack alignment="trailing" spacing={scale > 1 ? 4 : 12} frame={{ width: carWidth, alignment: 'trailing' }}>
-            <HStack spacing={6}>
-              <Image systemName="cloud" resizable scaleToFit foregroundStyle="rgba(255,255,255,0.68)" frame={{ width: 10, height: 8 }} />
-              <Text font={fontSizeOf(settings, 9)} fontWeight="medium" foregroundStyle={fontColorOf(settings, 'rgba(255,255,255,0.82)')}>
-                {settings.showTemp && Number.isFinite(d.outsideTemp) ? `${d.outsideTemp.toFixed(0)}°C` : ''}
-              </Text>
-            </HStack>
-            <Image filePath={CAR_IMAGE_PATH} resizable scaleToFit frame={{ width: carWidth, height: Math.min(56 * scale, 72) }} offset={{ x: 0, y: 6 }} shadow={{ color: 'rgba(0,0,0,0.38)', radius: 5, x: 0, y: 3 }} />
-            <Text font={fontSizeOf(settings, 7.5)} foregroundStyle={fontColorOf(settings, 'rgba(255,255,255,0.55)')} lineLimit={1} minScaleFactor={0.65}>{updateText(d.updatedAt, Date.now(), settings.updateTimeStyle)}</Text>
-          </VStack>
-        </HStack>
-      </Link>
+        )}
+        <VStack alignment="trailing" spacing={scale > 1 ? 4 : 12} frame={{ width: carWidth, alignment: 'trailing' }}>
+          <HStack spacing={6}>
+            <Image systemName="cloud" resizable scaleToFit foregroundStyle="rgba(255,255,255,0.68)" frame={{ width: 10, height: 8 }} />
+            <Text font={fontSizeOf(settings, 9)} fontWeight="medium" foregroundStyle={fontColorOf(settings, 'rgba(255,255,255,0.82)')}>
+              {settings.showTemp && Number.isFinite(d.outsideTemp) ? `${d.outsideTemp.toFixed(0)}°C` : ''}
+            </Text>
+          </HStack>
+          {refreshTap(d, carMark(carWidth, Math.min(56 * scale, 72), 6))}
+          <Text font={fontSizeOf(settings, 7.5)} foregroundStyle={fontColorOf(settings, 'rgba(255,255,255,0.55)')} lineLimit={1} minScaleFactor={0.65}>{updateText(d.updatedAt, Date.now(), settings.updateTimeStyle)}</Text>
+        </VStack>
+      </HStack>
 
       <Spacer />
 
-      <HStack spacing={6} frame={{ maxWidth: 'infinity' }}>
+      <HStack spacing={buttonGap} frame={{ maxWidth: 'infinity' }}>
         {BUTTONS.map((id, index) => {
-          if (id === 'blank') return <Spacer key={index} frame={{ width: buttonWidth, height: 31 }} />
+          if (id === 'blank') return <Spacer key={index} frame={{ width: buttonWidth, height: BUTTON_H }} />
           const action = buttonAction(id, d, index)
-          return <HStack key={index} spacing={0}>{mediumButton(buttonWidth, action.icon, action.label, action.intent, action.tint, action.confirmationIntent)}</HStack>
+          return <HStack key={index} spacing={0}>{controlButton(buttonWidth, id, action.state, action.intent, action.tint, action.confirmationIntent)}</HStack>
         })}
       </HStack>
     </VStack>
@@ -181,14 +225,15 @@ function mediumBody(d: CarData) {
 }
 
 function smallBody(d: CarData) {
-  const buttonWidth = (displaySize().width - 22 - 4 * (BUTTONS.length - 1)) / BUTTONS.length
+  const buttonGap = BUTTONS.length >= 6 ? 3 : 4
+  const buttonWidth = (displaySize().width - 22 - buttonGap * (BUTTONS.length - 1)) / BUTTONS.length
   const warnings = warningItems(d)
   const scale = carScaleOf(settings)
   const enlarged = scale > 1
   const imageHeight = Math.min((warnings.length && settings.showIcons ? 22 : 35) * scale, (warnings.length && settings.showIcons ? 34 : 48) + Math.max(0, displaySize().height - 158))
   return (
     <VStack alignment="leading" spacing={0} padding={{ horizontal: 11, top: enlarged ? 8 : 10, bottom: enlarged ? 7 : 9 }} background={BG} frame={{ maxWidth: 'infinity', maxHeight: 'infinity' }}>
-      <Link url={OPEN_URL}>
+      {tapToApp(
         <VStack alignment="leading" spacing={0} frame={{ maxWidth: 'infinity' }}>
           <HStack alignment="top" spacing={5} frame={{ maxWidth: 'infinity' }}>
             <VStack alignment="leading" spacing={1} frame={{ maxWidth: 'infinity', alignment: 'leading' }}>
@@ -201,26 +246,28 @@ function smallBody(d: CarData) {
               <Text font={fontSizeOf(settings, 8)} foregroundStyle={d.online ? fontColorOf(settings, '#86EFAC') : '#FCA5A5'}>{d.online ? '在线' : '离线'}</Text>
             </VStack>
           </HStack>
-          <Text font={fontSizeOf(settings, 8.5)} foregroundStyle={fontColorOf(settings, 'rgba(255,255,255,0.76)')} padding={{ top: enlarged ? 2 : 4 }} lineLimit={1} minScaleFactor={0.62} frame={{ maxWidth: 'infinity', alignment: 'leading' }}>{addressText(d)}</Text>
+          {settings.hideLocationRow ? null : <Text font={fontSizeOf(settings, 8.5)} foregroundStyle={fontColorOf(settings, 'rgba(255,255,255,0.76)')} padding={{ top: enlarged ? 2 : 4 }} lineLimit={1} minScaleFactor={0.62} frame={{ maxWidth: 'infinity', alignment: 'leading' }}>{addressText(d)}</Text>}
           <HStack spacing={3} padding={{ top: 2 }} frame={{ maxWidth: 'infinity', alignment: 'leading' }}>
             <Text font={fontSizeOf(settings, 8)} foregroundStyle={statusTint(d, d.online ? fontColorOf(settings, 'rgba(134,239,172,0.86)') : '#FCA5A5')} lineLimit={1} minScaleFactor={0.65} frame={{ maxWidth: 'infinity', alignment: 'leading' }}>{stateText(d)}</Text>
             <Text font={fontSizeOf(settings, 7)} foregroundStyle={fontColorOf(settings, 'rgba(255,255,255,0.5)')} lineLimit={1} minScaleFactor={0.65}>{updateText(d.updatedAt, Date.now(), settings.updateTimeStyle)}</Text>
           </HStack>
           <Text font={fontSizeOf(settings, 9.5)} fontWeight="semibold" foregroundStyle={fontColorOf(settings, 'rgba(255,255,255,0.94)')} padding={{ top: enlarged ? 1 : 3 }} lineLimit={1} minScaleFactor={0.62} frame={{ maxWidth: 'infinity', alignment: 'leading' }}>{statsText(d)}</Text>
           {warningRow(warnings, true)}
-          <ZStack alignment="bottom" frame={{ width: displaySize().width - 22, height: imageHeight + 3 }} padding={{ top: enlarged ? 1 : 3 }}>
-            <Image filePath={CAR_IMAGE_PATH} resizable scaleToFit frame={{ width: Math.min(90 * scale, displaySize().width - 22), height: imageHeight }} shadow={{ color: 'rgba(0,0,0,0.34)', radius: 4, x: 0, y: 2 }} />
-          </ZStack>
         </VStack>
-      </Link>
+      )}
+      {refreshTap(d,
+        <ZStack alignment="bottom" frame={{ width: displaySize().width - 22, height: imageHeight + 3 }} padding={{ top: enlarged ? 1 : 3 }}>
+          {carMark(Math.min(90 * scale, displaySize().width - 22), imageHeight)}
+        </ZStack>
+      )}
 
       <Spacer />
 
-      <HStack spacing={4} frame={{ maxWidth: 'infinity' }}>
+      <HStack spacing={buttonGap} frame={{ maxWidth: 'infinity' }}>
         {BUTTONS.map((id, index) => {
-          if (id === 'blank') return <Spacer key={index} frame={{ width: buttonWidth, height: 30 }} />
+          if (id === 'blank') return <Spacer key={index} frame={{ width: buttonWidth, height: BUTTON_H }} />
           const action = buttonAction(id, d, index)
-          return <HStack key={index} spacing={0}>{smallButton(buttonWidth, action.icon, action.intent, action.tint, action.confirmationIntent)}</HStack>
+          return <HStack key={index} spacing={0}>{controlButton(buttonWidth, id, action.state, action.intent, action.tint, action.confirmationIntent)}</HStack>
         })}
       </HStack>
     </VStack>
@@ -243,7 +290,7 @@ function EmptyView() {
 
 function buttonAction(id: string, d: CarData, slot: number) {
   const action = directButtonAction(id, d)
-  const target = id === 'lock' ? !d.locked : id === 'window' ? !windowsOpen(d) : id === 'engine' ? !d.engineOn : id === 'ac' ? !d.acOn : false
+  const target = id === 'lock' ? !d.locked : id === 'window' ? !windowsOpen(d) : id === 'trunk' ? !trunkOpen(d) : id === 'engine' ? !d.engineOn : id === 'ac' ? !d.acOn : false
   const confirmationIntent = settings.buttonConfirmations[slot] === true ? BeginConfirmationIntent({
     confirmAccount: d.accountId, confirmAction: id, confirmTarget: target ? '1' : '0', confirmVehicle: d.machineId || '', confirmSize: widgetSize,
     slot, id: Date.now().toString(36) + '-' + Math.random().toString(36).slice(2), issuedAt: Date.now(),
@@ -253,15 +300,16 @@ function buttonAction(id: string, d: CarData, slot: number) {
 function directButtonAction(id: string, d: CarData) {
   const binding = { accountId: d.accountId, machineId: d.machineId, size: widgetSize }
   switch (id) {
-    case 'lock': return { icon: d.locked ? 'lock.open' : 'lock', label: d.locked ? '解锁' : '锁车', intent: LockIntent({ ...binding, locked: !d.locked }), tint: '#93C5FD' }
-    case 'window': return { icon: 'rectangle.split.3x1', label: windowsOpen(d) ? '关窗' : '开窗', intent: WindowIntent({ ...binding, open: !windowsOpen(d) }), tint: '#67E8F9' }
-    case 'engine': return { icon: 'power', label: d.engineOn ? '熄火' : '启动', intent: EngineIntent({ ...binding, start: !d.engineOn }), tint: accent }
-    case 'find': return { icon: 'speaker.wave.2', label: '寻车', intent: FindIntent(binding), tint: accent }
-    case 'cool': return { icon: 'snowflake', label: '冷车', intent: CoolIntent(binding), tint: '#67E8F9' }
-    case 'hot': return { icon: 'sun.max', label: '热车', intent: HotIntent(binding), tint: '#FDBA74' }
-    case 'ac': return { icon: 'fanblades', label: d.acOn ? '关空调' : '开空调', intent: ACIntent({ ...binding, on: !d.acOn }), tint: '#67E8F9' }
-    case 'trunk': return { icon: 'car.side.rear.open', label: '尾门', intent: TrunkIntent(binding), tint: accent }
-    default: return { icon: 'arrow.clockwise', label: '刷新', intent: RefreshIntent(binding), tint: '#7DD3FC' }
+    case 'lock': return { state: d.locked === true, label: d.locked ? '解锁' : '锁车', intent: LockIntent({ ...binding, locked: !d.locked }), tint: '#93C5FD' }
+    case 'window': return { state: windowsOpen(d), label: windowsOpen(d) ? '关窗' : '开窗', intent: WindowIntent({ ...binding, open: !windowsOpen(d) }), tint: '#67E8F9' }
+    case 'engine': return { state: d.engineOn === true, label: d.engineOn ? '熄火' : '启动', intent: EngineIntent({ ...binding, start: !d.engineOn }), tint: accent }
+    case 'find': return { state: false, label: '寻车', intent: FindIntent(binding), tint: accent }
+    case 'cool': return { state: false, label: '冷车', intent: CoolIntent(binding), tint: '#67E8F9' }
+    case 'hot': return { state: false, label: '热车', intent: HotIntent(binding), tint: '#FDBA74' }
+    case 'ac': return { state: d.acOn === true, label: d.acOn ? '关空调' : '开空调', intent: ACIntent({ ...binding, on: !d.acOn }), tint: '#67E8F9' }
+    // Use the provider-specific trunk state and explicit requested target.
+    case 'trunk': return { state: trunkOpen(d), label: trunkOpen(d) ? '关尾门' : '开尾门', intent: TrunkIntent({ ...binding, open: !trunkOpen(d) }), tint: accent }
+    default: return { state: false, label: '刷新', intent: RefreshIntent(binding), tint: '#7DD3FC' }
   }
 }
 function ringBody(d: CarData) {
@@ -271,7 +319,7 @@ function ringBody(d: CarData) {
   const stateHeight = Math.ceil(fontSizeOf(settings, 8) * 1.3)
   const timeHeight = Math.ceil(fontSizeOf(settings, 7) * 1.3)
   const detailsHeight = stateHeight + timeHeight + 2
-  const buttonHeight = 30
+  const buttonHeight = BUTTON_H
   const mainHeight = Math.max(1, height - pad * 2 - titleHeight - detailsHeight - buttonHeight - gap * 3)
   const diameter = Math.min(mainHeight, innerWidth * 0.47, 88)
   const carWidth = innerWidth - diameter - 7
@@ -283,36 +331,33 @@ function ringBody(d: CarData) {
   const svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><circle cx="50" cy="50" r="44" fill="none" stroke="rgba(255,255,255,0.12)" stroke-width="5"/>' + (available && pct > 0 ? '<circle cx="50" cy="50" r="44" fill="none" stroke="' + color + '" stroke-width="5" stroke-linecap="round" stroke-dasharray="' + (length * pct / 100) + ' ' + length + '" transform="rotate(-90 50 50)"/>' : '') + '</svg>'
   const info = metricItems(d, [settings.smallRingInfo])[0]
   const infoText = info ? `${settings.smallRingInfo === 'oil' ? '剩余' : info.label} ${info.value}${info.unit ? ' ' + info.unit : ''}` : ''
-  const binding = { accountId: d.accountId, machineId: d.machineId, size: widgetSize }
   return <VStack spacing={gap} padding={pad} frame={{ width, height }}>
-    <Link url={OPEN_URL}><Text font={fontSizeOf(settings, 14)} fontWeight="bold" foregroundStyle={fontColorOf(settings, 'white')} lineLimit={1} minScaleFactor={0.65} frame={{ width: innerWidth, height: titleHeight }}>{title(d)}</Text></Link>
-    <Button intent={RefreshIntent(binding)} buttonStyle="plain" frame={{ width: innerWidth, height: mainHeight }}>
-      <HStack spacing={7} frame={{ width: innerWidth, height: mainHeight }}>
-        <ZStack frame={{ width: diameter, height: diameter }}>
-          <SVG code={svg} resizable renderingMode="original" frame={{ width: diameter, height: diameter }} />
-          <VStack spacing={1} frame={{ width: diameter * 0.7 }}>
-            <Text font={fontSizeOf(settings, 17)} fontWeight="semibold" foregroundStyle={fontColorOf(settings, color)} lineLimit={1} minScaleFactor={0.55}>{available ? `${pct.toFixed(0)}%` : '--'}</Text>
-            <Text font={fontSizeOf(settings, 6.5)} foregroundStyle={fontColorOf(settings, '#A3B4CD')} lineLimit={1} minScaleFactor={0.6}>燃油余量</Text>
-          </VStack>
-        </ZStack>
-        <VStack spacing={4} frame={{ width: carWidth, height: mainHeight }}>
-          <Image filePath={CAR_IMAGE_PATH} resizable scaleToFit frame={{ width: Math.min(carWidth, carWidth * 0.94 * carScaleOf(settings)), height: Math.min(mainHeight * 0.65, mainHeight * 0.48 * carScaleOf(settings)) }} />
-          {info ? <Text font={fontSizeOf(settings, 8)} foregroundStyle={info.alert ? '#FB923C' : fontColorOf(settings, '#C3D1E4')} lineLimit={1} minScaleFactor={0.65}>{infoText}</Text> : null}
+    {tapToApp(<Text font={fontSizeOf(settings, 14)} fontWeight="bold" foregroundStyle={fontColorOf(settings, 'white')} lineLimit={1} minScaleFactor={0.65} frame={{ width: innerWidth, height: titleHeight }}>{title(d)}</Text>)}
+    <HStack spacing={7} frame={{ width: innerWidth, height: mainHeight }}>
+      {tapToApp(<ZStack frame={{ width: diameter, height: diameter }}>
+        <SVG code={svg} resizable renderingMode="original" frame={{ width: diameter, height: diameter }} />
+        <VStack spacing={1} frame={{ width: diameter * 0.7 }}>
+          <Text font={fontSizeOf(settings, 17)} fontWeight="semibold" foregroundStyle={fontColorOf(settings, color)} lineLimit={1} minScaleFactor={0.55}>{available ? `${pct.toFixed(0)}%` : '--'}</Text>
+          <Text font={fontSizeOf(settings, 6.5)} foregroundStyle={fontColorOf(settings, '#A3B4CD')} lineLimit={1} minScaleFactor={0.6}>燃油余量</Text>
         </VStack>
-      </HStack>
-    </Button>
-    <VStack spacing={2} frame={{ width: innerWidth, height: detailsHeight }}>
+      </ZStack>)}
+      <VStack spacing={4} frame={{ width: carWidth, height: mainHeight }}>
+        {refreshTap(d, carMark(Math.min(carWidth, carWidth * 0.94 * carScaleOf(settings)), Math.min(mainHeight * 0.65, mainHeight * 0.48 * carScaleOf(settings))))}
+        {info ? tapToApp(<Text font={fontSizeOf(settings, 8)} foregroundStyle={info.alert ? '#FB923C' : fontColorOf(settings, '#C3D1E4')} lineLimit={1} minScaleFactor={0.65}>{infoText}</Text>) : null}
+      </VStack>
+    </HStack>
+    {tapToApp(<VStack spacing={2} frame={{ width: innerWidth, height: detailsHeight }}>
       <HStack spacing={4} frame={{ width: innerWidth, height: stateHeight }}>
         <Text font={fontSizeOf(settings, 8)} foregroundStyle={statusTint(d, fontColorOf(settings, 'rgba(255,255,255,0.76)'))} lineLimit={1} minScaleFactor={0.65}>{stateText(d)}</Text>
-        {settings.showIcons ? warningItems(d).filter(item => item.icon !== 'lock.open.fill').slice(0, 2).map(item => <Image key={item.label} systemName={item.icon} resizable scaleToFit foregroundStyle={item.tint} frame={{ width: 7, height: 7 }} />) : null}
+        {settings.showIcons ? warningItems(d).filter(item => item.icon !== 'lock.open.fill').slice(0, 2).map(item => <HStack key={item.label}>{warningIcon(item, 7)}</HStack>) : null}
       </HStack>
       <Text font={fontSizeOf(settings, 7)} foregroundStyle={fontColorOf(settings, 'rgba(255,255,255,0.5)')} lineLimit={1} minScaleFactor={0.65} frame={{ width: innerWidth, height: timeHeight }}>{updateText(d.updatedAt, Date.now(), settings.updateTimeStyle)}</Text>
-    </VStack>
+    </VStack>)}
     <HStack spacing={4} frame={{ width: innerWidth, height: buttonHeight }}>
       {BUTTONS.map((id, index) => {
         if (id === 'blank') return <Spacer key={index} frame={{ width: buttonWidth, height: buttonHeight }} />
         const action = buttonAction(id, d, index)
-        return <HStack key={index} spacing={0}>{smallButton(buttonWidth, action.icon, action.intent, action.tint, action.confirmationIntent)}</HStack>
+        return <HStack key={index} spacing={0}>{controlButton(buttonWidth, id, action.state, action.intent, action.tint, action.confirmationIntent)}</HStack>
       })}
     </HStack>
   </VStack>
@@ -324,7 +369,7 @@ function dashboardPanel(children: any, width: number, height: number, padding = 
   </ZStack>
 }
 function dashboardHeader(d: CarData, width: number, height: number) {
-  return <Link url={OPEN_URL}><HStack spacing={6} frame={{ width, height }}>
+  return tapToApp(<HStack spacing={6} frame={{ width, height }}>
     <VStack alignment="leading" spacing={1} frame={{ maxWidth: 'infinity', alignment: 'leading' }}>
       <Text font={fontSizeOf(settings, height < 40 ? 19 : 23)} fontWeight="bold" foregroundStyle={fontColorOf(settings, 'white')} lineLimit={1} minScaleFactor={0.7}>{title(d)}</Text>
       {plateText(d, settings) ? <Text font={fontSizeOf(settings, 8.5)} foregroundStyle={fontColorOf(settings, '#A3B4CD')} lineLimit={1}>{plateText(d, settings)}</Text> : null}
@@ -333,7 +378,7 @@ function dashboardHeader(d: CarData, width: number, height: number) {
       <Text font={fontSizeOf(settings, 9)} foregroundStyle={known(d, 'online') ? d.online ? fontColorOf(settings, '#9AE6CB') : '#FCA5A5' : fontColorOf(settings, '#A3B4CD')}>{known(d, 'online') ? d.online ? '车辆在线' : '车辆离线' : '在线状态未知'}</Text>
       {settings.showTemp ? <Text font={fontSizeOf(settings, 9)} foregroundStyle={fontColorOf(settings, '#D7E4F7')}>{known(d, 'outsideTemp') ? d.outsideTemp.toFixed(0) + '°C' : '--°C'}</Text> : null}
     </VStack>
-  </HStack></Link>
+  </HStack>)
 }
 function dashboardHero(d: CarData, width: number, height: number) {
   const summaryWidth = Math.min(100, width * 0.3)
@@ -341,19 +386,19 @@ function dashboardHero(d: CarData, width: number, height: number) {
   const timeHeight = fontSizeOf(settings, 7.5) * 1.35
   const imageHeight = Math.max(1, height - timeHeight - 2)
   const color = dashboardAttention(d) ? '#FB923C' : fontColorOf(settings, '#9AE6CB')
-  return <Link url={OPEN_URL}><HStack spacing={6} frame={{ width, height }}>
+  return <HStack spacing={6} frame={{ width, height }}><Link url={OPEN_URL}>
     <VStack alignment="leading" spacing={4} frame={{ width: summaryWidth, alignment: 'leading' }}>
       {height >= 65 ? <Text font={fontSizeOf(settings, 8)} foregroundStyle={fontColorOf(settings, '#91A8C7')}>驻车状态</Text> : null}
       <Text font={fontSizeOf(settings, height < 65 ? 13 : 17)} fontWeight="semibold" foregroundStyle={color} lineLimit={1} minScaleFactor={0.6}>{parkingText(d)}</Text>
       <Text font={fontSizeOf(settings, 8.5)} foregroundStyle={color} lineLimit={2} minScaleFactor={0.7}>{engineText(d)}</Text>
-    </VStack>
+    </VStack></Link>
     <VStack alignment="trailing" spacing={2} frame={{ width: imageArea, height }}>
-      <ZStack frame={{ width: imageArea, height: imageHeight }}>
-        <Image filePath={CAR_IMAGE_PATH} resizable scaleToFit frame={{ width: Math.min(imageArea, imageArea * 0.82 * carScaleOf(settings)), height: Math.min(imageHeight, imageHeight * 0.8 * carScaleOf(settings)) }} shadow={{ color: 'rgba(0,0,0,0.3)', radius: 5, x: 0, y: 4 }} />
-      </ZStack>
+      {refreshTap(d, <ZStack frame={{ width: imageArea, height: imageHeight }}>
+        {carMark(Math.min(imageArea, imageArea * 0.82 * carScaleOf(settings)), Math.min(imageHeight, imageHeight * 0.8 * carScaleOf(settings)))}
+      </ZStack>)}
       <Text font={fontSizeOf(settings, 7.5)} foregroundStyle={fontColorOf(settings, '#8CA1BC')} lineLimit={1} minScaleFactor={0.65} frame={{ width: imageArea, height: timeHeight, alignment: 'trailing' }}>{updateText(d.updatedAt, Date.now(), settings.updateTimeStyle)}</Text>
     </VStack>
-  </HStack></Link>
+  </HStack>
 }
 function dashboardMetrics(d: CarData, width: number, height: number, grid = false) {
   const metrics = metricItems(d, settings.metricSlots)
@@ -397,29 +442,27 @@ function dashboardTires(d: CarData, width: number, height: number) {
   </VStack>)}</HStack>, width, height, padding)
 }
 function dashboardLocation(d: CarData, width: number, height: number) {
-  return <Link url={OPEN_URL}>{dashboardPanel(<>
+  return tapToApp(dashboardPanel(<>
     {height >= 54 ? <Text multilineTextAlignment="center" font={fontSizeOf(settings, 8)} foregroundStyle={fontColorOf(settings, '#90A8C6')}>{settings.showAddress ? '车辆位置' : '随行短句'}</Text> : null}
     <Text multilineTextAlignment="center" font={fontSizeOf(settings, height > 40 ? 11 : 9)} foregroundStyle={fontColorOf(settings, '#CDD9E9')} lineLimit={height >= 54 ? 2 : 1} minScaleFactor={0.65}>{addressText(d)}</Text>
-  </>, width, height, height >= 54 ? 10 : 7)}</Link>
+  </>, width, height, height >= 54 ? 10 : 7))
 }
-function dashboardReminders(lines: string[], width: number, height: number) {
+function dashboardReminders(d: CarData, lines: string[], width: number, height: number) {
   if (!lines.length) return null
   const visible = lines.slice(0, height < 35 ? 1 : 2)
-  return <Link url={OPEN_URL}>{dashboardPanel(<VStack alignment="center" spacing={2}>{visible.map((line, index) => <Text multilineTextAlignment="center" key={index} font={fontSizeOf(settings, height < 35 ? 8.5 : 10)} foregroundStyle={fontColorOf(settings, '#E8D6B1')} lineLimit={1} minScaleFactor={0.65}>{line}</Text>)}</VStack>, width, height, 7)}</Link>
+  return tapToApp(dashboardPanel(<VStack alignment="center" spacing={2}>{visible.map((line, index) => <Text multilineTextAlignment="center" key={index} font={fontSizeOf(settings, height < 35 ? 8.5 : 10)} foregroundStyle={fontColorOf(settings, '#E8D6B1')} lineLimit={1} minScaleFactor={0.65}>{line}</Text>)}</VStack>, width, height, 7))
 }
 function dashboardButtons(d: CarData, width: number, height: number) {
   const gap = 7
+  const rowHeight = Math.max(20, Math.min(height, BUTTON_H))
   const buttonWidth = (width - gap * (BUTTONS.length - 1)) / BUTTONS.length
   return <HStack spacing={gap} frame={{ width, height }}>{BUTTONS.map((id, index) => {
-    if (id === 'blank') return <Spacer key={index} frame={{ width: buttonWidth, height }} />
+    if (id === 'blank') return <Spacer key={index} frame={{ width: buttonWidth, height: rowHeight }} />
     const action = buttonAction(id, d, index)
-    return <ControlButton key={index} intent={action.intent} confirmationIntent={action.confirmationIntent} frame={{ width: buttonWidth, height }}>
-      <ZStack frame={{ width: buttonWidth, height }}>
-        <RoundedRectangle cornerRadius={11} fill={buttonBackgroundOf(settings)} frame={{ width: buttonWidth, height }} />
-        <HStack spacing={4}>
-          <Image systemName={action.icon} resizable scaleToFit foregroundStyle={buttonIconOf(settings, action.tint)} frame={{ width: 12, height: 12 }} />
-          <Text font={fontSizeOf(settings, 9.5)} fontWeight="medium" foregroundStyle={buttonTextOf(settings, '#E5EEF9')} lineLimit={1} minScaleFactor={0.65}>{action.label}</Text>
-        </HStack>
+    return <ControlButton key={index} intent={action.intent} confirmationIntent={action.confirmationIntent} frame={{ width: buttonWidth, height: rowHeight }}>
+      <ZStack frame={{ width: buttonWidth, height: rowHeight }}>
+        <RoundedRectangle cornerRadius={buttonRadiusOf(settings, rowHeight, 11)} fill={buttonBackgroundOf(settings)} frame={{ width: buttonWidth, height: rowHeight }} />
+        {actionIcon(id, action.state, action.tint, iconSizeOf(rowHeight, buttonWidth))}
       </ZStack>
     </ControlButton>
   })}</HStack>
@@ -430,13 +473,17 @@ function largeBody(d: CarData) {
   const metricCount = settings.showMetrics ? metricItems(d, settings.metricSlots).length : 0
   const stateCount = settings.showStates ? stateItems(d, settings.stateSlots).length : 0
   const showTires = supportsTires() && settings.showTires
-  const l = dashboardLayout(width, height, reminders.length > 0, { metricCount, stateCount, tires: showTires, location: settings.showLocationCard })
+  // “隐藏地址一行”优先级高于信息卡片里的位置卡片开关。
+  const showLocation = settings.showLocationCard && !settings.hideLocationRow
+  const l = dashboardLayout(width, height, reminders.length > 0, { metricCount, stateCount, tires: showTires, location: showLocation })
   const innerWidth = width - l.pad * 2
   if (l.wide) {
+    // 宽幅（超大号横屏）采用左右两栏：左栏车图+位置+提醒，右栏指标+状态+胎压+按钮。
+    // 下面的常量都是各分区实测的固定高度，剩余高度全部给车图（hero）。
     const gap = 20
     const leftWidth = Math.round((innerWidth - gap) * 0.49), rightWidth = innerWidth - gap - leftWidth
     const innerHeight = height - l.pad * 2, sectionGap = 8, header = 34
-    const location = settings.showLocationCard ? 44 : 0, reminder = reminders.length ? 36 : 0
+    const location = showLocation ? 44 : 0, reminder = reminders.length ? 36 : 0
     const leftGaps = [header, 1, location, reminder].filter(value => value > 0).length - 1
     const hero = innerHeight - header - location - reminder - sectionGap * leftGaps
     const buttons = 40
@@ -450,7 +497,7 @@ function largeBody(d: CarData) {
         {dashboardHeader(d, leftWidth, header)}
         {dashboardHero(d, leftWidth, hero)}
         {location ? dashboardLocation(d, leftWidth, location) : null}
-        {reminder ? dashboardReminders(reminders, leftWidth, reminder) : null}
+        {reminder ? dashboardReminders(d, reminders, leftWidth, reminder) : null}
       </VStack>
       <VStack spacing={sectionGap} frame={{ width: rightWidth, height: innerHeight, alignment: 'top' }}>
         {metricCount ? dashboardMetrics(d, rightWidth, metricHeight, true) : null}
@@ -467,15 +514,14 @@ function largeBody(d: CarData) {
     {l.states ? dashboardStates(d, innerWidth, l.states) : null}
     {l.tires ? dashboardTires(d, innerWidth, l.tires) : null}
     {l.location ? dashboardLocation(d, innerWidth, l.location) : null}
-    {l.reminder ? dashboardReminders(reminders, innerWidth, l.reminder) : null}
+    {l.reminder ? dashboardReminders(d, reminders, innerWidth, l.reminder) : null}
     {dashboardButtons(d, innerWidth, l.buttons)}
   </VStack>
 }
 function Body({ data }: { data: CarData }) {
-  const family = String(Widget.family)
-  const { width, height } = displaySize()
-  if (isDashboardFamily(family, width, height)) return largeBody(data)
-  return family === 'systemSmall' || family === 'small'
+  // 直接用 module 级 widgetSize（已按 family + 实际尺寸算好），不再各处重复判断。
+  if (widgetSize === 'large' || widgetSize === 'extraLarge') return largeBody(data)
+  return widgetSize === 'small'
     ? settings.smallStyle === 'ring' ? ringBody(data) : smallBody(data)
     : mediumBody(data)
 }
@@ -602,14 +648,13 @@ async function main() {
   if (!confirmation && !recentlyFinishedConfirmation(widgetSize) && settings.autoRefresh && (!cached || Date.now() - cached.updatedAt >= settings.refreshMinutes * 60000)) {
     try { cached = await loadCar(); writeCache(cached) } catch { /* 网络失败保留上次成功快照 */ }
   }
-  const family = String(Widget.family)
-  const size = displaySize()
-  const dashboard = isDashboardFamily(family, size.width, size.height)
-  const extraLarge = family.toLowerCase().includes('extralarge') || (dashboard && (size.height > 430 || size.width >= 500))
-  const path = dashboard ? (extraLarge ? settings.extraLargeBackground || settings.largeBackground : settings.largeBackground)
-    : family === 'systemSmall' || family === 'small' ? settings.smallBackground : settings.mediumBackground
-  const exists = path ? await FileManager.exists(path).catch(() => false) : false
-  const carExists = settings.carImage ? await FileManager.exists(settings.carImage).catch(() => false) : true
+  const dashboard = widgetSize === 'large' || widgetSize === 'extraLarge'
+  const extraLarge = widgetSize === 'extraLarge'
+  const path = dashboard ? extraLarge ? settings.extraLargeBackground || settings.largeBackground : settings.largeBackground
+    : widgetSize === 'small' ? settings.smallBackground : settings.mediumBackground
+  // 背景图与车图是否存在只用同步检测；车图丢失时清空设置，回退成默认 car.png。
+  const exists = path ? fileExists(path) : false
+  const carExists = settings.carImage ? fileExists(settings.carImage) : true
   if (!carExists) { settings.carImage = ''; CAR_IMAGE_PATH = imagePath(settings) }
   cached = readCache()
   confirmation = readWidgetConfirmation(widgetSize)

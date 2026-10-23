@@ -80,6 +80,15 @@ export function patchCache(patch: Partial<CarData>): void {
   if (d) writeCache({ ...d, ...patch })
 }
 
+/** 统一解析接口响应：401 / 403 提示重新授权，其余错误抛出服务端提示。 */
+async function readPayload(res: any): Promise<any> {
+  if (res.status === 401 || res.status === 403) throw new Error('Token 无效或已过期，请在授权与地图中更新')
+  if (!res.ok) throw new Error(`HTTP ${res.status}`)
+  const obj: any = await res.json()
+  if (String(obj?.status) !== '200') throw new Error(obj?.message || `状态 ${obj?.status}`)
+  return obj
+}
+
 async function apiGet(account: Account, path: string): Promise<any> {
   assertCurrentAccount(account)
   const res = await fetch(`https://${PROVIDERS[account.provider].host}${path}`, {
@@ -87,11 +96,8 @@ async function apiGet(account: Account, path: string): Promise<any> {
     headers: { 'Content-Type': 'application/json;charset=utf-8', Accept: '*/*', Authorization: account.token },
   })
   assertCurrentAccount(account)
-  if (res.status === 401 || res.status === 403) throw new Error('Token 无效或已过期，请在授权与地图中更新')
-  if (!res.ok) throw new Error(`HTTP ${res.status}`)
-  const obj: any = await res.json()
+  const obj = await readPayload(res)
   assertCurrentAccount(account)
-  if (String(obj?.status) !== '200') throw new Error(obj?.message || `状态 ${obj?.status}`)
   return obj?.data
 }
 
@@ -163,6 +169,7 @@ export async function loadCar(): Promise<CarData> {
   const machineId = String(obd?.machineId || vehicle.machineId || '').trim()
   if (!machineId) throw new Error('接口未返回车辆设备号，请确认 Token 对应的车辆')
   const loc = await apiGet(account, `/api/trail/getLocation?machineId=${encodeURIComponent(machineId)}`).catch(() => null)
+  // 油箱容量只用于换算油量百分比；车机未给时按 75L 估算。
   const oilBox = num(vehicle.oilBox) || 75
   const oil = num(obd?.realTimeOilLevel)
   const lat = num(loc?.location?.lat)
@@ -220,9 +227,6 @@ export async function sendCommand(command: string, data: unknown, alreadyString 
     headers: { 'Content-Type': 'application/json;charset=utf-8', Accept: '*/*', Authorization: account.token },
     body: JSON.stringify({ command, machineId: car.machineId, data: alreadyString ? String(data ?? '') : JSON.stringify(data ?? {}) }),
   })
-  if (res.status === 401 || res.status === 403) throw new Error('Token 无效或已过期，请在授权与地图中更新')
-  if (!res.ok) throw new Error(`HTTP ${res.status}`)
-  const obj: any = await res.json()
-  if (String(obj?.status) !== '200') throw new Error(obj?.message || `状态 ${obj?.status}`)
+  const obj = await readPayload(res)
   return String(obj?.message || '指令已发送')
 }
