@@ -162,7 +162,8 @@ function iconSizeOf(height: number, width: number) { return Math.round(Math.min(
 function actionIcon(id: string, state: boolean, tint: string, size: number) {
   // 白 = 未点亮：未激活色没设时用纯白，和设置页预览同一套规则。
   const active = iconActive(id, state)
-  return <SVG code={buttonIconSVG(id, state, buttonIconColorOf(settings, active, active ? tint : '#FFFFFF'), buttonIconLineWidthOf(settings))} resizable renderingMode="original" frame={{ width: size, height: size }} />
+  const fallback = id === 'seat' ? (active ? '#7DD3FC' : '#FDBA74') : (active ? tint : '#FFFFFF')
+  return <SVG code={buttonIconSVG(id, state, buttonIconColorOf(settings, active, fallback), buttonIconLineWidthOf(settings))} resizable renderingMode="original" frame={{ width: size, height: size }} />
 }
 // 车辆图片：组件里始终显示所选车辆照片（奥迪 Logo 只用在车辆中心主页）。
 function carMark(width: number, height: number, offsetY = 0) {
@@ -596,7 +597,9 @@ function ConfirmationBody({ state, data }: { state: WidgetConfirmation; data: Ca
   function icon(size: number) {
     return <ZStack frame={{ width: size, height: size }}>
       <RoundedRectangle cornerRadius={size * 0.3} fill={failed ? '#392938' : '#343032'} frame={{ width: size, height: size }} />
-      <Image systemName={symbol} resizable scaleToFit foregroundStyle={tint} frame={{ width: size * 0.43, height: size * 0.43 }} />
+      {state.action === 'seat'
+        ? <SVG code={buttonIconSVG('seat', !state.target, state.target ? '#7DD3FC' : '#FDBA74', buttonIconLineWidthOf(settings))} resizable renderingMode="original" frame={{ width: size * 0.46, height: size * 0.46 }} />
+        : <Image systemName={symbol} resizable scaleToFit foregroundStyle={tint} frame={{ width: size * 0.43, height: size * 0.43 }} />}
     </ZStack>
   }
   function actionButton(text: string, intent: any, w: number, h: number, primary = false) {

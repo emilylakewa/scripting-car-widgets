@@ -190,8 +190,9 @@ export function buttonIconSVG(id: string, state: boolean, color: string, lineWid
 export function iconActive(id: string, state: boolean): boolean {
   switch (id) {
     case 'engine':
-    case 'window':
+    case 'window': return !state
     case 'door': return state
+    case 'seat': return !state
     case 'trunk':
     case 'ac': return !state
     case 'find':

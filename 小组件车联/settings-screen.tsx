@@ -445,7 +445,8 @@ const ONE_KEY_ACTIONS = ['find', 'refresh', 'cool', 'hot']
 function iconColorOf(s: Settings, id: string, state: boolean) {
   const active = iconActive(id, state)
   // 白 = 未点亮：未激活色没设时就用纯白。
-  return buttonIconColorOf(s, active, active ? buttonIconTint(id, themeOf(s).accent) : '#FFFFFF')
+  const fallback = id === 'seat' ? (active ? '#7DD3FC' : '#FDBA74') : (active ? buttonIconTint(id, themeOf(s).accent) : '#FFFFFF')
+  return buttonIconColorOf(s, active, fallback)
 }
 /** 近白判断：白（含纯白、留空回退）算未点亮，其余彩色算点亮。 */
 function isWhiteish(color: string) {
