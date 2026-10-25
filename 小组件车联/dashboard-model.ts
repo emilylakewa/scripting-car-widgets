@@ -1,4 +1,4 @@
-import type { CarData } from './api'
+import { bits, type CarData } from './api'
 import { panelOpen, doorsOpen } from './vehicle-state'
 
 export type StateItem = { label: string; value: string; alert: boolean }
@@ -7,23 +7,6 @@ type InfoItem = { label: string; value: string; unit: string; alert: boolean }
 /** 该字段是否真的被车辆上报过（availability 由 api.loadCar 依据原始返回计算）。 */
 export function known(d: CarData, key: string): boolean {
   return d.availability?.[key] === true
-}
-
-/**
- * 位图字段（车门、车灯、车窗、座椅加热、胎压）在接口里可能是：
- * - 数组：[1, 0, 0, 0]
- * - 逗号分隔字符串：'0,0,1,0'
- * - 连续位串：'0100'（部分车机直接回传二进制串）
- * 无法解析时返回 null（表示“未知”），避免凭空造出 0 造成误判。
- */
-export function bits(value: unknown): number[] | null {
-  if (Array.isArray(value)) return value.length && value.every(v => Number.isInteger(v) && v >= 0) ? value as number[] : null
-  if (typeof value === 'number') return Number.isInteger(value) && value >= 0 ? [value] : null
-  if (typeof value !== 'string' || !value.trim()) return null
-  const parts = value.trim().split(',')
-  if (parts.some(v => !/^\d+$/.test(v.trim()))) return null
-  // 单个且长度 ≥2 的 0/1 串按位展开，其余按数字列表解析。
-  return parts.length === 1 && /^[01]{2,}$/.test(parts[0]) ? parts[0].split('').map(Number) : parts.map(Number)
 }
 
 /** 位图字段里是否有任意一位被置起。原实现用 includes('1') 判断，遇到 10、12 之类数值会误报。 */
@@ -57,10 +40,7 @@ function metricItem(d: CarData, key: string): InfoItem {
 function stateItem(d: CarData, key: string): StateItem {
   switch (key) {
     case 'windows': return closedState('车窗', d.windows, known(d, 'windows'))
-    case 'carDoor': {
-      const open = doorsOpen(d)
-      return { label: '车门', value: open === null ? '未知' : open ? '未关闭' : '全部关闭', alert: open === true }
-    }
+    case 'carDoor': { const open = doorsOpen(d); return { label: '车门', value: open === null ? '未知' : open ? '未关闭' : '全部关闭', alert: open === true } }
     case 'carLamp': {
       const lamp = closedState('车灯', d.carLamp, known(d, 'carLamp'))
       // 车灯只有开 / 关，没有“全部关闭”的说法。
@@ -74,16 +54,13 @@ function stateItem(d: CarData, key: string): StateItem {
     }
     default: {
       const heat = known(d, 'heatSeat') ? bits(d.heatSeat) : null
-      return { label: '座椅加热', value: heat ? heat.some(v => v > 0) ? '已开启' : '已关闭' : '未知', alert: false }
+      return { label: '座椅加热', value: heat ? anyBitSet(d.heatSeat) ? '已开启' : '已关闭' : '未知', alert: false }
     }
   }
 }
 
 export function parkingText(d: CarData): string { return known(d, 'locked') ? d.locked ? '已锁车' : '未锁车' : '车锁未知' }
 export function engineText(d: CarData): string { return known(d, 'engineOn') ? d.engineOn ? '发动机运行中' : '发动机已熄火' : '发动机状态未知' }
-export function dashboardAttention(d: CarData): boolean {
-  return (known(d, 'locked') && !d.locked) || (known(d, 'engineOn') && d.engineOn)
-}
 
 function defaultMetricItems(d: CarData): InfoItem[] {
   return METRIC_KEYS.map(key => metricItem(d, key))
@@ -113,10 +90,7 @@ function extraItem(d: CarData, id: string): InfoItem {
 
 /** 按用户选择的槽位顺序，只构造被选中的项（不再每次都算满 12 项）。 */
 function itemById(d: CarData, id: string): InfoItem | null {
-  if (id === 'trunkStatus' || id === 'hoodStatus') {
-    const open = panelOpen(d, id === 'trunkStatus' ? 'trunk' : 'hood')
-    return { label: id === 'trunkStatus' ? '尾门状态' : '车盖状态', value: open === null ? '未知' : open ? '未关闭' : '已关闭', unit: '', alert: open === true }
-  }
+  if (id === 'trunkStatus' || id === 'hoodStatus') { const open = panelOpen(d, id === 'trunkStatus' ? 'trunk' : 'hood'); return { label: id === 'trunkStatus' ? '尾门状态' : '车盖状态', value: open === null ? '未知' : open ? '未关闭' : '已关闭', unit: '', alert: open === true } }
   if (METRIC_KEYS.includes(id)) return metricItem(d, id)
   if (STATE_KEYS.includes(id)) return { ...stateItem(d, id), unit: '' }
   const tireIndex = ['tireLF', 'tireRF', 'tireLR', 'tireRR'].indexOf(id)
@@ -149,7 +123,7 @@ export function stateItems(d: CarData, slots?: string[]): StateItem[] {
  * 高度魔法数字来自实测：header / metric / states / location / reminder / buttons
  * 都是各分区的最小可用高度，剩余空间全部给 hero（车图区域）。
  */
-export function dashboardLayout(width: number, height: number, hasReminders: boolean, sections: { metricCount?: number; stateCount?: number; tires?: boolean; location?: boolean } = {}) {
+export function dashboardLayout(width: number, height: number, hasReminders: boolean, sections: { metricCount?: number; stateCount?: number; tires?: boolean; location?: boolean; buttonHeight?: number } = {}) {
   const wide = width / height >= 1.45 && width >= 500
   const compact = height < 430
   const pad = compact ? 12 : 18
@@ -162,8 +136,12 @@ export function dashboardLayout(width: number, height: number, hasReminders: boo
   const tires = sections.tires === false ? 0 : compact ? 26 : 34
   const location = sections.location === false ? 0 : compact ? 26 : 60
   const reminder = hasReminders ? compact ? 24 : 48 : 0
-  const buttons = compact ? 32 : 44
-  const gaps = [header, 1, metric, states, tires, location, reminder, buttons].filter(value => value > 0).length - 1
+  // 按钮条高度直接跟“按钮高度”设置走，只受可用空间（车图至少留 20）夹一下。
+  const buttonsBase = Math.max(20, Math.round(sections.buttonHeight ?? (compact ? 32 : 44)))
+  const fixedHeight = header + metric + states + tires + location + reminder
+  const gaps = [header, 1, metric, states, tires, location, reminder, buttonsBase].filter(value => value > 0).length - 1
+  const buttonsCap = height - 2 * pad - fixedHeight - gap * gaps - 20
+  const buttons = Math.max(20, Math.min(buttonsBase, buttonsCap))
   const hero = height - 2 * pad - header - metric - states - tires - location - reminder - buttons - gap * gaps
   return { wide, compact, pad, gap, gaps, header, metric, states, tires, location, reminder, buttons, hero: Math.max(20, hero) }
 }

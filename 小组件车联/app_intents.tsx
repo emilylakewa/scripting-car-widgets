@@ -1,15 +1,14 @@
 import { AppIntentManager, AppIntentProtocol, Widget } from 'scripting'
 import { beginWidgetConfirmation, cancelWidgetConfirmation, submitWidgetConfirmation, type StartConfirmation } from './widget-confirmation'
-import { readCache } from './api'
-import { trunkOpen } from './vehicle-state'
 import { parseControlRequest, performControlAction } from './command-confirmation'
 
-type Binding = { accountId: string; machineId: string; size: string }
+// slot 只有座椅加热用得上（每个按钮各记一份挡位）；其它动作带着也无害。
+type Binding = { accountId: string; machineId: string; size: string; slot?: number }
 // 所有组件控车意图共用的入口：解析参数 → 交给统一执行核心（乐观状态、失败回滚都它做）。
 async function execute(action: string, target: boolean, parameters: Binding): Promise<void> {
   try {
     const request = parseControlRequest({ confirmAction: action, confirmTarget: target ? '1' : '0',
-      confirmVehicle: parameters?.machineId, confirmSize: parameters?.size, confirmAccount: parameters?.accountId })
+      confirmVehicle: parameters?.machineId, confirmSize: parameters?.size, confirmAccount: parameters?.accountId, confirmSlot: parameters?.slot })
     if (!request) throw new Error('组件操作已失效，请刷新后重试')
     await performControlAction(request)
   } finally {
@@ -18,78 +17,36 @@ async function execute(action: string, target: boolean, parameters: Binding): Pr
   }
 }
 
-export const LockIntent = AppIntentManager.register({
-  name: 'CarLinkCarLock', protocol: AppIntentProtocol.AppIntent,
-  perform: async (parameters: Binding & { locked: boolean }) => {
-    if (typeof parameters?.locked !== 'boolean') throw new Error('无效的组件操作')
-    await execute('lock', parameters.locked, parameters)
-  },
-})
+// 十个控车意图只有名字、动作和布尔参数键不同：用同一个工厂登记，避免十份几乎一样的包装。
+// boolKey 为空表示这个动作不需要布尔参数（寻车 / 冷车 / 热车 / 尾门 / 刷新）。
+function controlIntent(name: string, action: string, boolKey?: string) {
+  return AppIntentManager.register({
+    name, protocol: AppIntentProtocol.AppIntent,
+    perform: async (parameters: any) => {
+      const flag = boolKey ? parameters?.[boolKey] : false
+      if (boolKey && typeof flag !== 'boolean') throw new Error('无效的组件操作')
+      await execute(action, flag, parameters)
+    },
+  })
+}
 
-export const WindowIntent = AppIntentManager.register({
-  name: 'CarLinkCarWindow', protocol: AppIntentProtocol.AppIntent,
-  perform: async (parameters: Binding & { open: boolean }) => {
-    if (typeof parameters?.open !== 'boolean') throw new Error('无效的组件操作')
-    await execute('window', parameters.open, parameters)
-  },
-})
-
-export const EngineIntent = AppIntentManager.register({
-  name: 'CarLinkCarEngine', protocol: AppIntentProtocol.AppIntent,
-  perform: async (parameters: Binding & { start: boolean }) => {
-    if (typeof parameters?.start !== 'boolean') throw new Error('无效的组件操作')
-    await execute('engine', parameters.start, parameters)
-  },
-})
-
-export const ACIntent = AppIntentManager.register({
-  name: 'CarLinkCarAC', protocol: AppIntentProtocol.AppIntent,
-  perform: async (parameters: Binding & { on: boolean }) => {
-    if (typeof parameters?.on !== 'boolean') throw new Error('无效的组件操作')
-    await execute('ac', parameters.on, parameters)
-  },
-})
-
-export const CoolIntent = AppIntentManager.register({
-  name: 'CarLinkCarCool', protocol: AppIntentProtocol.AppIntent,
-  perform: async (parameters: Binding) => {
-    await execute('cool', false, parameters)
-  },
-})
-
-export const HotIntent = AppIntentManager.register({
-  name: 'CarLinkCarHot', protocol: AppIntentProtocol.AppIntent,
-  perform: async (parameters: Binding) => {
-    await execute('hot', false, parameters)
-  },
-})
-
-export const FindIntent = AppIntentManager.register({
-  name: 'CarLinkCarFind', protocol: AppIntentProtocol.AppIntent,
-  perform: async (parameters: Binding) => {
-    await execute('find', false, parameters)
-  },
-})
-
-export const TrunkIntent = AppIntentManager.register({
-  name: 'CarLinkCarTrunk', protocol: AppIntentProtocol.AppIntent,
-  perform: async (parameters: Binding & { open?: boolean }) => {
-    const open = typeof parameters.open === 'boolean' ? parameters.open : !trunkOpen(readCache())
-    await execute('trunk', open, parameters)
-  },
-})
-
-export const RefreshIntent = AppIntentManager.register({
-  name: 'CarLinkCarRefresh', protocol: AppIntentProtocol.AppIntent,
-  perform: async (parameters: Binding) => {
-    await execute('refresh', false, parameters)
-  },
-})
+export const LockIntent = controlIntent('CarLinkCarLock', 'lock', 'locked')
+export const WindowIntent = controlIntent('CarLinkCarWindow', 'window', 'open')
+export const EngineIntent = controlIntent('CarLinkCarEngine', 'engine', 'start')
+export const ACIntent = controlIntent('CarLinkCarAC', 'ac', 'on')
+export const SeatIntent = controlIntent('CarLinkCarSeat', 'seat', 'on')
+export const CoolIntent = controlIntent('CarLinkCarCool', 'cool')
+export const HotIntent = controlIntent('CarLinkCarHot', 'hot')
+export const FindIntent = controlIntent('CarLinkCarFind', 'find')
+export const TrunkIntent = controlIntent('CarLinkCarTrunk', 'trunk', 'open')
+export const RefreshIntent = controlIntent('CarLinkCarRefresh', 'refresh')
 
 export const BeginConfirmationIntent = AppIntentManager.register({
   name: 'CarLinkCarBeginConfirmation', protocol: AppIntentProtocol.AppIntent,
   perform: async (parameters: StartConfirmation) => {
     try { beginWidgetConfirmation(parameters) } finally { Widget.reloadAll() }
+    // 这里只做同步动作，绝不能再 await 长任务：意图不返回时系统会把重绘压到意图结束后，
+    // 确认页就出不来（3.9.5 的教训）。
   },
 })
 export const CancelConfirmationIntent = AppIntentManager.register({

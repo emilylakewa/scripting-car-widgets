@@ -13,16 +13,17 @@ import {
   Link,
   Script,
 } from 'scripting'
+import type { Color } from 'scripting'
 import { loadCar, writeCache, readCache, type CarData } from './api'
-import { BeginConfirmationIntent, CancelConfirmationIntent, SubmitConfirmationIntent, ACIntent, TrunkIntent, CoolIntent, HotIntent, FindIntent, EngineIntent, LockIntent, RefreshIntent, WindowIntent } from './app_intents'
+import { BeginConfirmationIntent, CancelConfirmationIntent, SubmitConfirmationIntent, ACIntent, SeatIntent, TrunkIntent, CoolIntent, HotIntent, FindIntent, EngineIntent, LockIntent, RefreshIntent, WindowIntent } from './app_intents'
 
-import { readSettings, settingsForSize, widgetSizeFor, infoBackgroundOf, visibleButtons, fontSizeOf, fontColorOf, buttonBackgroundOf, buttonHeightOf, buttonIconColorOf, carScaleOf, backgroundDimOf, barSizeOf, buttonRadiusOf, imagePath, gradientOf, plateText, reminderLines, themeOf } from './settings'
-import { buttonIconSVG } from './button-icons'
+import { readSettingsForSize, widgetSizeFor, infoBackgroundOf, visibleButtons, fontSizeOf, fontColorOf, buttonBackgroundOf, buttonHeightOf, buttonIconColorOf, buttonIconLineWidthOf, carScaleOf, backgroundDimOf, barSizeOf, buttonRadiusOf, imagePath, gradientOf, plateText, reminderLines, themeOf } from './settings'
+import { buttonIconSVG, buttonIconTint, iconActive } from './button-icons'
 import { updateText, supportsTires } from './credentials'
-import { readWidgetConfirmation, recentlyFinishedConfirmation, type WidgetConfirmation } from './widget-confirmation'
+import { armConfirmationWindow, CONFIRM_SECONDS, readWidgetConfirmation, recentlyFinishedConfirmation, type WidgetConfirmation } from './widget-confirmation'
 import { requestedCommand } from './command-confirmation'
-import { statusTint, trunkOpen, bodyWarnings } from './vehicle-state'
-import { dashboardLayout, known, bits, anyBitSet, metricItems, stateItems, tireItems, dashboardAttention, parkingText, engineText } from './dashboard-model'
+import { statusTint, needsAttention, trunkOpen, bodyWarnings } from './vehicle-state'
+import { dashboardLayout, known, anyBitSet, metricItems, stateItems, tireItems, parkingText, engineText } from './dashboard-model'
 // Widget.displaySize 在一次渲染内是常量，读一次缓存起来，
 // 避免各个分区反复访问原生属性、也避免多处的默认值分叉。
 const DISPLAY = (() => {
@@ -33,11 +34,36 @@ function displaySize() {
   return DISPLAY
 }
 const widgetSize = widgetSizeFor(String(Widget.family), DISPLAY.width, DISPLAY.height)
-const settings = settingsForSize(readSettings(), widgetSize)
+// 只读一次存储、只归一化本尺寸这一份配置（原来是 6 遍）。
+const settings = readSettingsForSize(widgetSize)
 const BUTTONS = visibleButtons(settings)
+// 读钥匙串是本组件渲染里最慢的一步，而确认页、小号都不显示胎压：改成用到时才读一次
+// （同一进程内仍然只读一次，与原行为一致）。
+let tiresSupported: boolean | undefined
+function hasTires() {
+  if (tiresSupported === undefined) tiresSupported = supportsTires()
+  return tiresSupported
+}
 let CAR_IMAGE_PATH = imagePath(settings)
 const OPEN_URL = Script.createRunSingleURLScheme(Script.name)
-const NEXT_RELOAD = new Date(Date.now() + settings.refreshMinutes * 60 * 1000)
+// 一次渲染只取一次当前时间：各处计时与指令时间戳复用同一基准。
+const NOW = Date.now()
+// 关掉自动刷新后依然按 refreshMinutes 请求下一次重载，是最耗电的一步：
+// 每次重载都要把整个 JS 模块从头跑一遍（读设置、查文件、建视图树）。
+// 这里改成 6 小时兜底一次，App 内改设置 / 点刷新都会立刻 Widget.reloadAll()，不会被拖慢。
+const IDLE_RELOAD_MINUTES = 6 * 60
+const REFRESH_TOLERANCE = 2 * 60 * 1000
+// 组件渲染有时间预算：自动刷新一旦碰上慢网（单请求超时就 12 秒），系统会直接放弃这一帧，
+// 用户看到的是白屏或旧占位。给网络刷新封一个上限，超时就用现有快照画，不让白屏。
+const REFRESH_BUDGET_MS = 5000
+function loadCarWithin(ms: number): Promise<CarData> {
+  let timer: any
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error('refresh timeout')), ms)
+  })
+  return Promise.race([loadCar(), timeout]).finally(() => { if (timer !== undefined) clearTimeout(timer) })
+}
+const NEXT_RELOAD = new Date(NOW + (settings.autoRefresh ? settings.refreshMinutes : IDLE_RELOAD_MINUTES) * 60 * 1000)
 const BG = 'clear'
 const accent = themeOf(settings).accent
 const BUTTON_H = buttonHeightOf(settings)
@@ -67,12 +93,13 @@ function addressText(d: CarData): string {
 function windowsOpen(d: CarData): boolean {
   return Array.isArray(d.windows) && d.windows.some(v => v !== 0)
 }
-type WarningItem = { icon: string; label: string; tint: string }
+type WarningItem = { icon: string; label: string; tint: Color }
 
 function warningItems(d: CarData): WarningItem[] {
   const items: WarningItem[] = []
   // 位图字段统一解析：原来的 includes('1') 会把 10、12 这类数值误判成“已开启”。
   if (known(d, 'carLamp') && anyBitSet(d.carLamp)) items.push({ icon: 'headlight.low.beam.fill', label: '车灯未关', tint: '#FBBF24' })
+  // carDoor 的第 9 位是尾门，所以文案要盖住尾门，否则尾门单独打开时会误报“车门未关”。
   items.push(...bodyWarnings(d))
   if (known(d, 'windows') && windowsOpen(d)) items.push({ icon: 'rectangle.split.3x1', label: '车窗未关', tint: '#38BDF8' })
   if (known(d, 'heatSeat') && anyBitSet(d.heatSeat)) items.push({ icon: 'seat.heat', label: '座椅加热', tint: '#F97316' })
@@ -83,12 +110,6 @@ function warningItems(d: CarData): WarningItem[] {
   return items
 }
 
-function warningIcon(item: WarningItem, size: number) {
-  return item.icon === 'door' || item.icon === 'trunk'
-    ? <SVG code={buttonIconSVG(item.icon, true, item.tint)} resizable renderingMode="original" frame={{ width: size, height: size }} />
-    : <Image systemName={item.icon} resizable scaleToFit foregroundStyle={item.tint} frame={{ width: size, height: size }} />
-}
-
 function warningRow(items: WarningItem[], compact = false) {
   if (!settings.showIcons || items.length === 0) return null
   const visible = items.slice(0, 3)
@@ -96,12 +117,24 @@ function warningRow(items: WarningItem[], compact = false) {
     <HStack spacing={compact ? 5 : 7} padding={{ top: compact ? 2 : 4 }} frame={{ maxWidth: 'infinity', alignment: 'leading' }}>
       {visible.map(item => (
         <HStack spacing={2} key={item.label}>
-          {warningIcon(item, compact ? 9 : 12)}
+          {item.icon === 'door' || item.icon === 'trunk' ? <SVG code={buttonIconSVG(item.icon, true, item.tint, buttonIconLineWidthOf(settings))} resizable renderingMode="original" frame={{ width: compact ? 9 : 12, height: compact ? 9 : 12 }} /> : <Image systemName={item.icon} resizable scaleToFit foregroundStyle={item.tint} frame={{ width: compact ? 9 : 12, height: compact ? 9 : 12 }} />}
           {!compact && items.length === 1 ? <Text font={fontSizeOf(settings, 8.5)} foregroundStyle={item.tint} lineLimit={1}>{item.label}</Text> : null}
         </HStack>
       ))}
     </HStack>
   )
+}
+
+// 同一份 CarData 在一次渲染里会被好几个分区读取（车窗 / 尾门 / 告警行），
+// 以对象身份为键缓存，只算一次；模块随每次渲染重建，缓存跟着一起消失。
+type Derived = { windows: boolean; trunk: boolean; warnings: WarningItem[] }
+const derivedCache = new WeakMap<CarData, Derived>()
+function derived(d: CarData): Derived {
+  const hit = derivedCache.get(d)
+  if (hit) return hit
+  const value: Derived = { windows: windowsOpen(d), trunk: trunkOpen(d), warnings: warningItems(d) }
+  derivedCache.set(d, value)
+  return value
 }
 
 // 同步判断文件是否存在：渲染前只需一次本地查证，同步版本可省掉两次 async 往返。
@@ -126,24 +159,10 @@ function ControlButton({ intent, confirmationIntent, frame, children }: { intent
   return <Button intent={confirmationIntent || intent} buttonStyle="plain" frame={frame}>{children}</Button>
 }
 function iconSizeOf(height: number, width: number) { return Math.round(Math.min(20, Math.max(11, Math.min(height * 0.6, width - 9)))) }
-// 图标取色语义：true 用「图标激活状态颜色」。
-// 图标形状始终按真实状态画（state），只有颜色按按钮当前的动作方向走：
-// 一键类动作（寻车 / 刷新 / 冷车 / 热车）没有开关两态，固定用激活色；
-// 启动 / 开窗 / 开尾门 也是「去开启」类动作，所以待执行时亮起、执行完转暗；锁车、空调按实际开关取色。
-function iconActive(id: string, state: boolean): boolean {
-  switch (id) {
-    case 'engine':
-    case 'window':
-    case 'trunk': return !state
-    case 'find':
-    case 'refresh':
-    case 'cool':
-    case 'hot': return true
-    default: return state
-  }
-}
 function actionIcon(id: string, state: boolean, tint: string, size: number) {
-  return <SVG code={buttonIconSVG(id, state, buttonIconColorOf(settings, iconActive(id, state), tint))} resizable renderingMode="original" frame={{ width: size, height: size }} />
+  // 白 = 未点亮：未激活色没设时用纯白，和设置页预览同一套规则。
+  const active = iconActive(id, state)
+  return <SVG code={buttonIconSVG(id, state, buttonIconColorOf(settings, active, active ? tint : '#FFFFFF'), buttonIconLineWidthOf(settings))} resizable renderingMode="original" frame={{ width: size, height: size }} />
 }
 // 车辆图片：组件里始终显示所选车辆照片（奥迪 Logo 只用在车辆中心主页）。
 function carMark(width: number, height: number, offsetY = 0) {
@@ -169,6 +188,18 @@ function controlButton(width: number, id: string, state: boolean, intent: any, t
     </ControlButton>
   )
 }
+// 小 / 中 / 环形三种尺寸的底部按钮行完全同构，抽出来只写一次。
+function controlRow(d: CarData, gap: number, buttonWidth: number, frame: any = { maxWidth: 'infinity' }) {
+  return (
+    <HStack spacing={gap} frame={frame}>
+      {BUTTONS.map((id, index) => {
+        if (id === 'blank') return <Spacer key={index} frame={{ width: buttonWidth, height: BUTTON_H }} />
+        const action = buttonAction(id, d, index)
+        return <HStack key={index} spacing={0}>{controlButton(buttonWidth, id, action.state, action.intent, action.tint, action.confirmationIntent)}</HStack>
+      })}
+    </HStack>
+  )
+}
 
 
 function mediumBody(d: CarData) {
@@ -180,7 +211,7 @@ function mediumBody(d: CarData) {
   const contentWidth = widgetWidth - 26 - carWidth - 8
   const bar = barSizeOf(settings)
   const barWidth = Math.min(bar.width, contentWidth)
-  const warnings = warningItems(d)
+  const warnings = derived(d).warnings
   return (
     <VStack alignment="leading" spacing={0} padding={{ horizontal: 13, top: 12, bottom: 10 }} background={BG} frame={{ maxWidth: 'infinity', maxHeight: 'infinity' }}>
       <HStack alignment="top" spacing={8} frame={{ maxWidth: 'infinity', alignment: 'leading' }}>
@@ -207,30 +238,26 @@ function mediumBody(d: CarData) {
             </Text>
           </HStack>
           {refreshTap(d, carMark(carWidth, Math.min(56 * scale, 72), 6))}
-          <Text font={fontSizeOf(settings, 7.5)} foregroundStyle={fontColorOf(settings, 'rgba(255,255,255,0.55)')} lineLimit={1} minScaleFactor={0.65}>{updateText(d.updatedAt, Date.now(), settings.updateTimeStyle)}</Text>
+          <Text font={fontSizeOf(settings, 7.5)} foregroundStyle={fontColorOf(settings, 'rgba(255,255,255,0.55)')} lineLimit={1} minScaleFactor={0.65}>{updateText(d.updatedAt, NOW, settings.updateTimeStyle)}</Text>
         </VStack>
       </HStack>
 
       <Spacer />
 
-      <HStack spacing={buttonGap} frame={{ maxWidth: 'infinity' }}>
-        {BUTTONS.map((id, index) => {
-          if (id === 'blank') return <Spacer key={index} frame={{ width: buttonWidth, height: BUTTON_H }} />
-          const action = buttonAction(id, d, index)
-          return <HStack key={index} spacing={0}>{controlButton(buttonWidth, id, action.state, action.intent, action.tint, action.confirmationIntent)}</HStack>
-        })}
-      </HStack>
+      {controlRow(d, buttonGap, buttonWidth)}
     </VStack>
   )
 }
 
 function smallBody(d: CarData) {
+  const { width: widgetWidth, height: widgetHeight } = displaySize()
   const buttonGap = BUTTONS.length >= 6 ? 3 : 4
-  const buttonWidth = (displaySize().width - 22 - buttonGap * (BUTTONS.length - 1)) / BUTTONS.length
-  const warnings = warningItems(d)
+  const buttonWidth = (widgetWidth - 22 - buttonGap * (BUTTONS.length - 1)) / BUTTONS.length
+  const warnings = derived(d).warnings
+  const hasWarnings = warnings.length > 0 && settings.showIcons
   const scale = carScaleOf(settings)
   const enlarged = scale > 1
-  const imageHeight = Math.min((warnings.length && settings.showIcons ? 22 : 35) * scale, (warnings.length && settings.showIcons ? 34 : 48) + Math.max(0, displaySize().height - 158))
+  const imageHeight = Math.min((hasWarnings ? 22 : 35) * scale, (hasWarnings ? 34 : 48) + Math.max(0, widgetHeight - 158))
   return (
     <VStack alignment="leading" spacing={0} padding={{ horizontal: 11, top: enlarged ? 8 : 10, bottom: enlarged ? 7 : 9 }} background={BG} frame={{ maxWidth: 'infinity', maxHeight: 'infinity' }}>
       {tapToApp(
@@ -249,27 +276,21 @@ function smallBody(d: CarData) {
           {settings.hideLocationRow ? null : <Text font={fontSizeOf(settings, 8.5)} foregroundStyle={fontColorOf(settings, 'rgba(255,255,255,0.76)')} padding={{ top: enlarged ? 2 : 4 }} lineLimit={1} minScaleFactor={0.62} frame={{ maxWidth: 'infinity', alignment: 'leading' }}>{addressText(d)}</Text>}
           <HStack spacing={3} padding={{ top: 2 }} frame={{ maxWidth: 'infinity', alignment: 'leading' }}>
             <Text font={fontSizeOf(settings, 8)} foregroundStyle={statusTint(d, d.online ? fontColorOf(settings, 'rgba(134,239,172,0.86)') : '#FCA5A5')} lineLimit={1} minScaleFactor={0.65} frame={{ maxWidth: 'infinity', alignment: 'leading' }}>{stateText(d)}</Text>
-            <Text font={fontSizeOf(settings, 7)} foregroundStyle={fontColorOf(settings, 'rgba(255,255,255,0.5)')} lineLimit={1} minScaleFactor={0.65}>{updateText(d.updatedAt, Date.now(), settings.updateTimeStyle)}</Text>
+            <Text font={fontSizeOf(settings, 7)} foregroundStyle={fontColorOf(settings, 'rgba(255,255,255,0.5)')} lineLimit={1} minScaleFactor={0.65}>{updateText(d.updatedAt, NOW, settings.updateTimeStyle)}</Text>
           </HStack>
           <Text font={fontSizeOf(settings, 9.5)} fontWeight="semibold" foregroundStyle={fontColorOf(settings, 'rgba(255,255,255,0.94)')} padding={{ top: enlarged ? 1 : 3 }} lineLimit={1} minScaleFactor={0.62} frame={{ maxWidth: 'infinity', alignment: 'leading' }}>{statsText(d)}</Text>
           {warningRow(warnings, true)}
         </VStack>
       )}
       {refreshTap(d,
-        <ZStack alignment="bottom" frame={{ width: displaySize().width - 22, height: imageHeight + 3 }} padding={{ top: enlarged ? 1 : 3 }}>
-          {carMark(Math.min(90 * scale, displaySize().width - 22), imageHeight)}
+        <ZStack alignment="bottom" frame={{ width: widgetWidth - 22, height: imageHeight + 3 }} padding={{ top: enlarged ? 1 : 3 }}>
+          {carMark(Math.min(90 * scale, widgetWidth - 22), imageHeight)}
         </ZStack>
       )}
 
       <Spacer />
 
-      <HStack spacing={buttonGap} frame={{ maxWidth: 'infinity' }}>
-        {BUTTONS.map((id, index) => {
-          if (id === 'blank') return <Spacer key={index} frame={{ width: buttonWidth, height: BUTTON_H }} />
-          const action = buttonAction(id, d, index)
-          return <HStack key={index} spacing={0}>{controlButton(buttonWidth, id, action.state, action.intent, action.tint, action.confirmationIntent)}</HStack>
-        })}
-      </HStack>
+      {controlRow(d, buttonGap, buttonWidth)}
     </VStack>
   )
 }
@@ -289,27 +310,32 @@ function EmptyView() {
 
 
 function buttonAction(id: string, d: CarData, slot: number) {
-  const action = directButtonAction(id, d)
-  const target = id === 'lock' ? !d.locked : id === 'window' ? !windowsOpen(d) : id === 'trunk' ? !trunkOpen(d) : id === 'engine' ? !d.engineOn : id === 'ac' ? !d.acOn : false
+  const action = directButtonAction(id, d, slot)
   const confirmationIntent = settings.buttonConfirmations[slot] === true ? BeginConfirmationIntent({
-    confirmAccount: d.accountId, confirmAction: id, confirmTarget: target ? '1' : '0', confirmVehicle: d.machineId || '', confirmSize: widgetSize,
-    slot, id: Date.now().toString(36) + '-' + Math.random().toString(36).slice(2), issuedAt: Date.now(),
+    confirmAccount: d.accountId, confirmAction: id, confirmTarget: action.target ? '1' : '0', confirmVehicle: d.machineId || '', confirmSize: widgetSize,
+    confirmSlot: slot, id: NOW.toString(36) + '-' + Math.random().toString(36).slice(2), issuedAt: NOW,
   }) : undefined
   return { ...action, confirmationIntent }
 }
-function directButtonAction(id: string, d: CarData) {
-  const binding = { accountId: d.accountId, machineId: d.machineId, size: widgetSize }
+/** 每个按钮的当前状态、下一步目标值、标题与意图；target 与 intent 里的入参必须一致。 */
+function directButtonAction(id: string, d: CarData, slot: number) {
+  // slot 跟着意图走：座椅加热的挡位是按按钮槽位各存一份的，不传就取不到这个按钮的挡位。
+  const binding = { accountId: d.accountId, machineId: d.machineId, size: widgetSize, slot }
+  const tint = buttonIconTint(id, accent)
+  const { windows: windowsAreOpen, trunk: trunkIsOpen } = derived(d)
   switch (id) {
-    case 'lock': return { state: d.locked === true, label: d.locked ? '解锁' : '锁车', intent: LockIntent({ ...binding, locked: !d.locked }), tint: '#93C5FD' }
-    case 'window': return { state: windowsOpen(d), label: windowsOpen(d) ? '关窗' : '开窗', intent: WindowIntent({ ...binding, open: !windowsOpen(d) }), tint: '#67E8F9' }
-    case 'engine': return { state: d.engineOn === true, label: d.engineOn ? '熄火' : '启动', intent: EngineIntent({ ...binding, start: !d.engineOn }), tint: accent }
-    case 'find': return { state: false, label: '寻车', intent: FindIntent(binding), tint: accent }
-    case 'cool': return { state: false, label: '冷车', intent: CoolIntent(binding), tint: '#67E8F9' }
-    case 'hot': return { state: false, label: '热车', intent: HotIntent(binding), tint: '#FDBA74' }
-    case 'ac': return { state: d.acOn === true, label: d.acOn ? '关空调' : '开空调', intent: ACIntent({ ...binding, on: !d.acOn }), tint: '#67E8F9' }
-    // Use the provider-specific trunk state and explicit requested target.
-    case 'trunk': return { state: trunkOpen(d), label: trunkOpen(d) ? '关尾门' : '开尾门', intent: TrunkIntent({ ...binding, open: !trunkOpen(d) }), tint: accent }
-    default: return { state: false, label: '刷新', intent: RefreshIntent(binding), tint: '#7DD3FC' }
+    case 'lock': return { state: d.locked === true, target: !d.locked, label: d.locked ? '解锁' : '锁车', intent: LockIntent({ ...binding, locked: !d.locked }), tint }
+    case 'window': return { state: windowsAreOpen, target: !windowsAreOpen, label: windowsAreOpen ? '关窗' : '开窗', intent: WindowIntent({ ...binding, open: !windowsAreOpen }), tint }
+    case 'engine': return { state: d.engineOn === true, target: !d.engineOn, label: d.engineOn ? '熄火' : '启动', intent: EngineIntent({ ...binding, start: !d.engineOn }), tint }
+    case 'find': return { state: false, target: false, label: '寻车', intent: FindIntent(binding), tint }
+    case 'cool': return { state: false, target: false, label: '冷车', intent: CoolIntent(binding), tint }
+    case 'hot': return { state: false, target: false, label: '热车', intent: HotIntent(binding), tint }
+    case 'ac': return { state: d.acOn === true, target: !d.acOn, label: d.acOn ? '关空调' : '开空调', intent: ACIntent({ ...binding, on: !d.acOn }), tint }
+    // 座椅加热：heatSeat 位串只要有一位非 0 就算已开启；下发 CMD_HEATSEAT（开启 flag 1 + 设置里的挡位，关闭 flag 0 + type 0）。
+    case 'seat': { const heatOn = anyBitSet(d.heatSeat); return { state: heatOn, target: !heatOn, label: heatOn ? '关加热' : '开加热', intent: SeatIntent({ ...binding, on: !heatOn }), tint } }
+    // 尾门：carDoor 第 9 位为 1 表示已开。
+    case 'trunk': return { state: trunkIsOpen, target: !trunkIsOpen, label: trunkIsOpen ? '关尾门' : '开尾门', intent: TrunkIntent({ ...binding, open: !trunkIsOpen }), tint }
+    default: return { state: false, target: false, label: '刷新', intent: RefreshIntent(binding), tint }
   }
 }
 function ringBody(d: CarData) {
@@ -324,6 +350,7 @@ function ringBody(d: CarData) {
   const diameter = Math.min(mainHeight, innerWidth * 0.47, 88)
   const carWidth = innerWidth - diameter - 7
   const buttonWidth = (innerWidth - 4 * (BUTTONS.length - 1)) / BUTTONS.length
+  const scale = carScaleOf(settings)
   const available = known(d, 'fuelPct') && Number.isFinite(d.fuelPct)
   const pct = available ? Math.max(0, Math.min(100, d.fuelPct)) : 0
   const length = 2 * Math.PI * 44
@@ -342,24 +369,18 @@ function ringBody(d: CarData) {
         </VStack>
       </ZStack>)}
       <VStack spacing={4} frame={{ width: carWidth, height: mainHeight }}>
-        {refreshTap(d, carMark(Math.min(carWidth, carWidth * 0.94 * carScaleOf(settings)), Math.min(mainHeight * 0.65, mainHeight * 0.48 * carScaleOf(settings))))}
+        {refreshTap(d, carMark(Math.min(carWidth, carWidth * 0.94 * scale), Math.min(mainHeight * 0.65, mainHeight * 0.48 * scale)))}
         {info ? tapToApp(<Text font={fontSizeOf(settings, 8)} foregroundStyle={info.alert ? '#FB923C' : fontColorOf(settings, '#C3D1E4')} lineLimit={1} minScaleFactor={0.65}>{infoText}</Text>) : null}
       </VStack>
     </HStack>
     {tapToApp(<VStack spacing={2} frame={{ width: innerWidth, height: detailsHeight }}>
       <HStack spacing={4} frame={{ width: innerWidth, height: stateHeight }}>
         <Text font={fontSizeOf(settings, 8)} foregroundStyle={statusTint(d, fontColorOf(settings, 'rgba(255,255,255,0.76)'))} lineLimit={1} minScaleFactor={0.65}>{stateText(d)}</Text>
-        {settings.showIcons ? warningItems(d).filter(item => item.icon !== 'lock.open.fill').slice(0, 2).map(item => <HStack key={item.label}>{warningIcon(item, 7)}</HStack>) : null}
+        {settings.showIcons ? derived(d).warnings.filter(item => item.icon !== 'lock.open.fill').slice(0, 2).map(item => item.icon === 'door' || item.icon === 'trunk' ? <SVG key={item.label} code={buttonIconSVG(item.icon, true, item.tint, buttonIconLineWidthOf(settings))} resizable renderingMode="original" frame={{ width: 7, height: 7 }} /> : <Image key={item.label} systemName={item.icon} resizable scaleToFit foregroundStyle={item.tint} frame={{ width: 7, height: 7 }} />) : null}
       </HStack>
-      <Text font={fontSizeOf(settings, 7)} foregroundStyle={fontColorOf(settings, 'rgba(255,255,255,0.5)')} lineLimit={1} minScaleFactor={0.65} frame={{ width: innerWidth, height: timeHeight }}>{updateText(d.updatedAt, Date.now(), settings.updateTimeStyle)}</Text>
+      <Text font={fontSizeOf(settings, 7)} foregroundStyle={fontColorOf(settings, 'rgba(255,255,255,0.5)')} lineLimit={1} minScaleFactor={0.65} frame={{ width: innerWidth, height: timeHeight }}>{updateText(d.updatedAt, NOW, settings.updateTimeStyle)}</Text>
     </VStack>)}
-    <HStack spacing={4} frame={{ width: innerWidth, height: buttonHeight }}>
-      {BUTTONS.map((id, index) => {
-        if (id === 'blank') return <Spacer key={index} frame={{ width: buttonWidth, height: buttonHeight }} />
-        const action = buttonAction(id, d, index)
-        return <HStack key={index} spacing={0}>{controlButton(buttonWidth, id, action.state, action.intent, action.tint, action.confirmationIntent)}</HStack>
-      })}
-    </HStack>
+    {controlRow(d, 4, buttonWidth, { width: innerWidth, height: buttonHeight })}
   </VStack>
 }
 function dashboardPanel(children: any, width: number, height: number, padding = 10) {
@@ -369,13 +390,18 @@ function dashboardPanel(children: any, width: number, height: number, padding = 
   </ZStack>
 }
 function dashboardHeader(d: CarData, width: number, height: number) {
+  const plate = plateText(d, settings)
+  // 在线状态未上报时用灰色 + “未知”，不能当成离线报红。
+  const onlineKnown = known(d, 'online')
+  const onlineText = onlineKnown ? d.online ? '车辆在线' : '车辆离线' : '在线状态未知'
+  const onlineColor = onlineKnown ? d.online ? fontColorOf(settings, '#9AE6CB') : '#FCA5A5' : fontColorOf(settings, '#A3B4CD')
   return tapToApp(<HStack spacing={6} frame={{ width, height }}>
     <VStack alignment="leading" spacing={1} frame={{ maxWidth: 'infinity', alignment: 'leading' }}>
       <Text font={fontSizeOf(settings, height < 40 ? 19 : 23)} fontWeight="bold" foregroundStyle={fontColorOf(settings, 'white')} lineLimit={1} minScaleFactor={0.7}>{title(d)}</Text>
-      {plateText(d, settings) ? <Text font={fontSizeOf(settings, 8.5)} foregroundStyle={fontColorOf(settings, '#A3B4CD')} lineLimit={1}>{plateText(d, settings)}</Text> : null}
+      {plate ? <Text font={fontSizeOf(settings, 8.5)} foregroundStyle={fontColorOf(settings, '#A3B4CD')} lineLimit={1}>{plate}</Text> : null}
     </VStack>
     <VStack alignment="trailing" spacing={2}>
-      <Text font={fontSizeOf(settings, 9)} foregroundStyle={known(d, 'online') ? d.online ? fontColorOf(settings, '#9AE6CB') : '#FCA5A5' : fontColorOf(settings, '#A3B4CD')}>{known(d, 'online') ? d.online ? '车辆在线' : '车辆离线' : '在线状态未知'}</Text>
+      <Text font={fontSizeOf(settings, 9)} foregroundStyle={onlineColor}>{onlineText}</Text>
       {settings.showTemp ? <Text font={fontSizeOf(settings, 9)} foregroundStyle={fontColorOf(settings, '#D7E4F7')}>{known(d, 'outsideTemp') ? d.outsideTemp.toFixed(0) + '°C' : '--°C'}</Text> : null}
     </VStack>
   </HStack>)
@@ -385,7 +411,7 @@ function dashboardHero(d: CarData, width: number, height: number) {
   const imageArea = width - summaryWidth - 6
   const timeHeight = fontSizeOf(settings, 7.5) * 1.35
   const imageHeight = Math.max(1, height - timeHeight - 2)
-  const color = dashboardAttention(d) ? '#FB923C' : fontColorOf(settings, '#9AE6CB')
+  const color = needsAttention(d) ? '#FB923C' : fontColorOf(settings, '#9AE6CB')
   return <HStack spacing={6} frame={{ width, height }}><Link url={OPEN_URL}>
     <VStack alignment="leading" spacing={4} frame={{ width: summaryWidth, alignment: 'leading' }}>
       {height >= 65 ? <Text font={fontSizeOf(settings, 8)} foregroundStyle={fontColorOf(settings, '#91A8C7')}>驻车状态</Text> : null}
@@ -396,12 +422,11 @@ function dashboardHero(d: CarData, width: number, height: number) {
       {refreshTap(d, <ZStack frame={{ width: imageArea, height: imageHeight }}>
         {carMark(Math.min(imageArea, imageArea * 0.82 * carScaleOf(settings)), Math.min(imageHeight, imageHeight * 0.8 * carScaleOf(settings)))}
       </ZStack>)}
-      <Text font={fontSizeOf(settings, 7.5)} foregroundStyle={fontColorOf(settings, '#8CA1BC')} lineLimit={1} minScaleFactor={0.65} frame={{ width: imageArea, height: timeHeight, alignment: 'trailing' }}>{updateText(d.updatedAt, Date.now(), settings.updateTimeStyle)}</Text>
+      <Text font={fontSizeOf(settings, 7.5)} foregroundStyle={fontColorOf(settings, '#8CA1BC')} lineLimit={1} minScaleFactor={0.65} frame={{ width: imageArea, height: timeHeight, alignment: 'trailing' }}>{updateText(d.updatedAt, NOW, settings.updateTimeStyle)}</Text>
     </VStack>
   </HStack>
 }
-function dashboardMetrics(d: CarData, width: number, height: number, grid = false) {
-  const metrics = metricItems(d, settings.metricSlots)
+function dashboardMetrics(metrics: any[], width: number, height: number, grid = false) {
   if (!metrics.length) return null
   const gap = 7, columns = grid ? Math.min(2, metrics.length) : metrics.length
   const rows = Math.ceil(metrics.length / columns)
@@ -418,8 +443,7 @@ function dashboardMetrics(d: CarData, width: number, height: number, grid = fals
   }
   return rows > 1 ? <VStack spacing={gap} frame={{ width, height }}>{Array.from({ length: rows }, (_, i) => row(metrics.slice(i * columns, (i + 1) * columns), i))}</VStack> : row(metrics, 0)
 }
-function dashboardStates(d: CarData, width: number, height: number) {
-  const items = stateItems(d, settings.stateSlots)
+function dashboardStates(items: any[], width: number, height: number) {
   if (!items.length) return null
   const columns = Math.min(3, items.length), rows = Math.ceil(items.length / columns)
   const cellWidth = (width - 16 - 6 * (columns - 1)) / columns
@@ -433,10 +457,11 @@ function dashboardStates(d: CarData, width: number, height: number) {
   }
   return dashboardPanel(<VStack spacing={4}>{Array.from({ length: rows }, (_, i) => row(i))}</VStack>, width, height, 8)
 }
-function dashboardTires(d: CarData, width: number, height: number) {
+function dashboardTires(items: any[], width: number, height: number) {
+  if (!items.length) return null
   const padding = height < 30 ? 2 : 6
   const cellWidth = (width - padding * 2 - 18) / 4
-  return dashboardPanel(<HStack spacing={6} frame={{ width: width - padding * 2, height: height - padding * 2 }}>{tireItems(d).map(item => <VStack key={item.label} alignment="center" spacing={1} frame={{ width: cellWidth }}>
+  return dashboardPanel(<HStack spacing={6} frame={{ width: width - padding * 2, height: height - padding * 2 }}>{items.map(item => <VStack key={item.label} alignment="center" spacing={1} frame={{ width: cellWidth }}>
     <Text multilineTextAlignment="center" font={fontSizeOf(settings, 7.5)} foregroundStyle={fontColorOf(settings, '#90A8C6')} lineLimit={1}>{item.label}</Text>
     <Text multilineTextAlignment="center" font={fontSizeOf(settings, height < 30 ? 9 : 10)} fontWeight="medium" foregroundStyle={fontColorOf(settings, '#C9E2DC')} lineLimit={1} minScaleFactor={0.7}>{item.value}</Text>
   </VStack>)}</HStack>, width, height, padding)
@@ -454,28 +479,48 @@ function dashboardReminders(d: CarData, lines: string[], width: number, height: 
 }
 function dashboardButtons(d: CarData, width: number, height: number) {
   const gap = 7
-  const rowHeight = Math.max(20, Math.min(height, BUTTON_H))
+  // 大 / 超大号可以给图标加两字说明：文字排在图标下方，图标相应缩一点给文字让位。
+  const labels = settings.showButtonLabels
+  const rowHeight = Math.max(labels ? 28 : 20, height)
   const buttonWidth = (width - gap * (BUTTONS.length - 1)) / BUTTONS.length
-  return <HStack spacing={gap} frame={{ width, height }}>{BUTTONS.map((id, index) => {
+  const labelFont = fontSizeOf(settings, rowHeight < 36 ? 8 : 9)
+  const labelHeight = Math.ceil(labelFont * 1.25)
+  // 按钮变高时图标也跟着长，上限 30；开文字时把文字高度扣掉。
+  const iconRoom = labels ? rowHeight - labelHeight - 4 : Math.round(rowHeight * 0.6)
+  const iconSize = Math.max(10, Math.min(iconRoom, buttonWidth - 10, 30))
+  return <HStack spacing={gap} frame={{ width, height: rowHeight }}>{BUTTONS.map((id, index) => {
     if (id === 'blank') return <Spacer key={index} frame={{ width: buttonWidth, height: rowHeight }} />
     const action = buttonAction(id, d, index)
     return <ControlButton key={index} intent={action.intent} confirmationIntent={action.confirmationIntent} frame={{ width: buttonWidth, height: rowHeight }}>
       <ZStack frame={{ width: buttonWidth, height: rowHeight }}>
         <RoundedRectangle cornerRadius={buttonRadiusOf(settings, rowHeight, 11)} fill={buttonBackgroundOf(settings)} frame={{ width: buttonWidth, height: rowHeight }} />
-        {actionIcon(id, action.state, action.tint, iconSizeOf(rowHeight, buttonWidth))}
+        {labels
+          ? <VStack alignment="center" spacing={1} frame={{ width: buttonWidth, height: rowHeight }}>
+              {actionIcon(id, action.state, action.tint, iconSize)}
+              <Text font={labelFont} fontWeight="medium" foregroundStyle={fontColorOf(settings, 'rgba(255,255,255,0.82)')} lineLimit={1} minScaleFactor={0.6} frame={{ height: labelHeight }}>{buttonCaption(action.label)}</Text>
+            </VStack>
+          : actionIcon(id, action.state, action.tint, iconSize)}
       </ZStack>
     </ControlButton>
   })}</HStack>
 }
+// 按钮下方的说明固定两个字：“开空调/关空调”取后两字 -> 空调，“开尾门” -> 尾门，其余本身就是两字。
+function buttonCaption(label: string) {
+  const chars = Array.from(label)
+  return chars.length > 2 ? chars.slice(-2).join('') : label
+}
 function largeBody(d: CarData) {
   const { width, height } = displaySize()
   const reminders = settings.showReminders ? reminderLines(settings, d) : []
-  const metricCount = settings.showMetrics ? metricItems(d, settings.metricSlots).length : 0
-  const stateCount = settings.showStates ? stateItems(d, settings.stateSlots).length : 0
-  const showTires = supportsTires() && settings.showTires
+  // 指标 / 状态 / 胎压均只算一次：布局只需长度，渲染直接用同一份列表，避开位图二次解析。
+  const metrics = settings.showMetrics ? metricItems(d, settings.metricSlots) : []
+  const states = settings.showStates ? stateItems(d, settings.stateSlots) : []
+  const showTires = settings.showTires && hasTires()
+  const tires = showTires ? tireItems(d) : []
+  const metricCount = metrics.length, stateCount = states.length
   // “隐藏地址一行”优先级高于信息卡片里的位置卡片开关。
   const showLocation = settings.showLocationCard && !settings.hideLocationRow
-  const l = dashboardLayout(width, height, reminders.length > 0, { metricCount, stateCount, tires: showTires, location: showLocation })
+  const l = dashboardLayout(width, height, reminders.length > 0, { metricCount, stateCount, tires: showTires, location: showLocation, buttonHeight: BUTTON_H })
   const innerWidth = width - l.pad * 2
   if (l.wide) {
     // 宽幅（超大号横屏）采用左右两栏：左栏车图+位置+提醒，右栏指标+状态+胎压+按钮。
@@ -485,13 +530,16 @@ function largeBody(d: CarData) {
     const innerHeight = height - l.pad * 2, sectionGap = 8, header = 34
     const location = showLocation ? 44 : 0, reminder = reminders.length ? 36 : 0
     const leftGaps = [header, 1, location, reminder].filter(value => value > 0).length - 1
-    const hero = innerHeight - header - location - reminder - sectionGap * leftGaps
-    const buttons = 40
+    const hero = Math.max(24, innerHeight - header - location - reminder - sectionGap * leftGaps)
     const stateRows = Math.ceil(stateCount / 3), stateBase = Math.min(90, Math.floor(innerHeight * 0.3))
-    const states = stateRows ? 16 + ((stateBase - 20) / 2) * stateRows + 4 * (stateRows - 1) : 0
-    const tires = showTires ? 34 : 0
-    const rightGaps = [metricCount ? 1 : 0, states, tires, buttons].filter(value => value > 0).length - 1
-    const metricHeight = metricCount ? innerHeight - states - tires - buttons - sectionGap * rightGaps : 0
+    const statesHeight = stateRows ? 16 + ((stateBase - 20) / 2) * stateRows + 4 * (stateRows - 1) : 0
+    const tiresHeight = tires.length ? 34 : 0
+    // 右栏按钮高度同样跟“按钮高度”设置走，但至少给指标卡留一条空间。
+    const buttonsCap = innerHeight - statesHeight - tiresHeight - (metricCount ? 52 : 0) - sectionGap * 3
+    const buttons = Math.max(20, Math.min(BUTTON_H, buttonsCap))
+    const rightGaps = [metricCount ? 1 : 0, statesHeight, tiresHeight, buttons].filter(value => value > 0).length - 1
+    // 高度被挤成负值时不再直接当 frame，至少留一条可读行高。
+    const metricHeight = metricCount ? Math.max(30, innerHeight - statesHeight - tiresHeight - buttons - sectionGap * rightGaps) : 0
     return <HStack alignment="top" spacing={gap} padding={l.pad} frame={{ width, height }}>
       <VStack spacing={sectionGap} frame={{ width: leftWidth, height: innerHeight }}>
         {dashboardHeader(d, leftWidth, header)}
@@ -500,9 +548,9 @@ function largeBody(d: CarData) {
         {reminder ? dashboardReminders(d, reminders, leftWidth, reminder) : null}
       </VStack>
       <VStack spacing={sectionGap} frame={{ width: rightWidth, height: innerHeight, alignment: 'top' }}>
-        {metricCount ? dashboardMetrics(d, rightWidth, metricHeight, true) : null}
-        {states ? dashboardStates(d, rightWidth, states) : null}
-        {tires ? dashboardTires(d, rightWidth, tires) : null}
+        {metricCount ? dashboardMetrics(metrics, rightWidth, metricHeight, true) : null}
+        {statesHeight ? dashboardStates(states, rightWidth, statesHeight) : null}
+        {tiresHeight ? dashboardTires(tires, rightWidth, tiresHeight) : null}
         {dashboardButtons(d, rightWidth, buttons)}
       </VStack>
     </HStack>
@@ -510,9 +558,9 @@ function largeBody(d: CarData) {
   return <VStack spacing={l.gap} padding={l.pad} frame={{ width, height }}>
     {dashboardHeader(d, innerWidth, l.header)}
     {dashboardHero(d, innerWidth, l.hero)}
-    {l.metric ? dashboardMetrics(d, innerWidth, l.metric) : null}
-    {l.states ? dashboardStates(d, innerWidth, l.states) : null}
-    {l.tires ? dashboardTires(d, innerWidth, l.tires) : null}
+    {l.metric ? dashboardMetrics(metrics, innerWidth, l.metric) : null}
+    {l.states ? dashboardStates(states, innerWidth, l.states) : null}
+    {l.tires ? dashboardTires(tires, innerWidth, l.tires) : null}
     {l.location ? dashboardLocation(d, innerWidth, l.location) : null}
     {l.reminder ? dashboardReminders(d, reminders, innerWidth, l.reminder) : null}
     {dashboardButtons(d, innerWidth, l.buttons)}
@@ -525,25 +573,29 @@ function Body({ data }: { data: CarData }) {
     ? settings.smallStyle === 'ring' ? ringBody(data) : smallBody(data)
     : mediumBody(data)
 }
+const CONFIRM_SYMBOL: Record<string, string> = {
+  engine: 'power', window: 'rectangle.split.3x1', find: 'speaker.wave.2.fill', cool: 'snowflake',
+  hot: 'sun.max.fill', ac: 'fanblades.fill', trunk: 'car.side.rear.open.fill', seat: 'seat.heat',
+}
 function ConfirmationBody({ state, data }: { state: WidgetConfirmation; data: CarData }) {
   const { width, height } = displaySize()
   const compact = width < 200, horizontal = !compact && height < 220
-  const pending = state.phase === 'pending', failed = state.phase === 'error'
+  // running 相位已经取消：要么待确认，要么失败，二选一。
+  const pending = state.phase === 'pending', failed = !pending
   const params = { size: widgetSize, id: state.id }
-  const tint = failed ? '#FDA4AF' : pending ? '#F5C982' : '#8AD9F0'
-  const heading = pending ? '请确认操作' : failed ? '操作未完成' : '正在提交…'
+  const tint = failed ? '#FDA4AF' : '#F5C982'
+  const heading = pending ? '请确认操作' : '操作未完成'
   const label = requestedCommand(state).label
   const vehicle = title(data), plate = plateText(data, settings)
   const identity = vehicle + (plate && plate !== vehicle ? ' · ' + plate : '')
-  const hint = failed ? state.message || '请返回车况后重新操作' : pending ? '确认后发送指令 · 60 秒内有效' : '请稍候，完成后返回车况'
-  const symbol = failed ? 'exclamationmark' : state.action === 'lock' ? state.target ? 'lock.fill' : 'lock.open.fill'
-    : state.action === 'engine' ? 'power' : state.action === 'window' ? 'rectangle.split.3x1'
-    : state.action === 'find' ? 'speaker.wave.2.fill' : state.action === 'cool' ? 'snowflake'
-    : state.action === 'hot' ? 'sun.max.fill' : state.action === 'ac' ? 'fanblades.fill'
-    : state.action === 'trunk' ? 'car.side.rear.open.fill' : 'arrow.clockwise'
+  const hint = pending ? `确认后发送指令 · ${CONFIRM_SECONDS} 秒内有效`
+    : state.message || '操作未完成，可返回车况重试'
+  const symbol = failed ? 'exclamationmark'
+    : state.action === 'lock' ? state.target ? 'lock.fill' : 'lock.open.fill'
+    : CONFIRM_SYMBOL[state.action] || 'arrow.clockwise'
   function icon(size: number) {
     return <ZStack frame={{ width: size, height: size }}>
-      <RoundedRectangle cornerRadius={size * 0.3} fill={failed ? '#392938' : pending ? '#343032' : '#1E3547'} frame={{ width: size, height: size }} />
+      <RoundedRectangle cornerRadius={size * 0.3} fill={failed ? '#392938' : '#343032'} frame={{ width: size, height: size }} />
       <Image systemName={symbol} resizable scaleToFit foregroundStyle={tint} frame={{ width: size * 0.43, height: size * 0.43 }} />
     </ZStack>
   }
@@ -556,18 +608,13 @@ function ConfirmationBody({ state, data }: { state: WidgetConfirmation; data: Ca
       </ZStack>
     </Button>
   }
+  // 点「取消」/「返回车况」都直接收票并重绘，组件立刻回到车况首页（不做任何自动回落）。
   function footer(w: number, h: number) {
-    if (pending) {
-      const gap = compact ? 8 : 10, buttonWidth = (w - gap) / 2
-      return <HStack spacing={gap} frame={{ width: w, height: h }}>
-        {actionButton('取消', CancelConfirmationIntent(params), buttonWidth, h)}
-        {actionButton(compact ? '确认' : '确认执行', SubmitConfirmationIntent(params), buttonWidth, h, true)}
-      </HStack>
-    }
-    if (failed) return actionButton('返回车况', CancelConfirmationIntent(params), w, h)
-    return <HStack spacing={6} frame={{ width: w, height: h }}>
-      <Image systemName="arrow.triangle.2.circlepath" foregroundStyle={tint} frame={{ width: 12, height: 12 }} />
-      <Text font={fontSizeOf(settings, compact ? 10 : 12)} foregroundStyle="#A6B9D0">正在处理，请勿重复操作</Text>
+    if (!pending) return actionButton('返回车况', CancelConfirmationIntent(params), w, h)
+    const gap = compact ? 8 : 10, buttonWidth = (w - gap) / 2
+    return <HStack spacing={gap} frame={{ width: w, height: h }}>
+      {actionButton('取消', CancelConfirmationIntent(params), buttonWidth, h)}
+      {actionButton(compact ? '确认' : '确认执行', SubmitConfirmationIntent(params), buttonWidth, h, true)}
     </HStack>
   }
   const pad = compact ? 12 : horizontal ? 16 : 22
@@ -608,7 +655,7 @@ function ConfirmationBody({ state, data }: { state: WidgetConfirmation; data: Ca
       <HStack frame={{ width: innerWidth, height: 20 }}>
         <Text font={fontSizeOf(settings, 12)} fontWeight="medium" foregroundStyle="#BACAE0">{heading}</Text>
         <Spacer />
-        <Text font={fontSizeOf(settings, 10)} foregroundStyle={tint}>{pending ? '等待确认' : failed ? '请重新操作' : '指令处理中'}</Text>
+        <Text font={fontSizeOf(settings, 10)} foregroundStyle={tint}>{pending ? '等待确认' : '请重新操作'}</Text>
       </HStack>
       <ZStack frame={{ width: innerWidth, height: panelHeight }}>
         <RoundedRectangle cornerRadius={20} fill="#1A2A40" frame={{ width: innerWidth, height: panelHeight }} />
@@ -627,38 +674,54 @@ function ConfirmationBody({ state, data }: { state: WidgetConfirmation; data: Ca
     {content}
   </ZStack>
 }
-function presentContent(content: any, confirmation: WidgetConfirmation | null, path = '', exists = false) {
+function presentContent(content: any, path = '', exists = false) {
   // Keep the same background and outer view when entering or leaving confirmation.
   const size = displaySize()
+  const dim = backgroundDimOf(settings)
   Widget.present(<ZStack background={gradientOf(settings)} frame={{ width: size.width, height: size.height }}>
     {exists ? <Image filePath={path} resizable scaleToFill clipped frame={{ width: size.width, height: size.height }} /> : null}
-    {exists && backgroundDimOf(settings) > 0 ? <RoundedRectangle cornerRadius={0} fill={`rgba(0,0,0,${backgroundDimOf(settings)})`} frame={{ width: size.width, height: size.height }} /> : null}
+    {exists && dim > 0 ? <RoundedRectangle cornerRadius={0} fill={`rgba(0,0,0,${dim})`} frame={{ width: size.width, height: size.height }} /> : null}
     {content}
-  </ZStack>, { policy: 'after', date: confirmation ? new Date(Math.min(NEXT_RELOAD.getTime(), confirmation.expiresAt)) : NEXT_RELOAD })
+  </ZStack>, { policy: 'after', date: NEXT_RELOAD })
+}
+// 车图丢失时的兜底路径：只算一次，且不回写模块级 settings（否则后续读取会拿到被清空的 carImage）。
+let fallbackImagePath: string | undefined
+function carImageFallbackPath(): string {
+  if (fallbackImagePath === undefined) fallbackImagePath = imagePath({ ...settings, carImage: '' })
+  return fallbackImagePath
 }
 async function main() {
   let cached = readCache()
   let confirmation = readWidgetConfirmation(widgetSize)
-  // Opening confirmation follows the normal background path, as in 3.1.9.
-  // Only feedback after a tap bypasses asset checks.
-  if (confirmation && confirmation.phase !== 'pending' && cached) {
-    presentContent(<ConfirmationBody state={confirmation} data={cached} />, confirmation)
+  // 失败提示页走快路径：不查背景图，直接用缓存画出来。
+  if (confirmation && confirmation.phase === 'error' && cached) {
+    presentContent(<ConfirmationBody state={confirmation} data={cached} />)
     return
   }
-  if (!confirmation && !recentlyFinishedConfirmation(widgetSize) && settings.autoRefresh && (!cached || Date.now() - cached.updatedAt >= settings.refreshMinutes * 60000)) {
-    try { cached = await loadCar(); writeCache(cached) } catch { /* 网络失败保留上次成功快照 */ }
+  // 系统实际重载可能早于预定时间（甚至只早几秒）。如果严格按 refreshMinutes 比较，
+  // 这次就会判定“还没到点”而不拉数据，下一次重载又要再等一整个间隔，
+  // 实际数据会陈旧到两倍间隔。这里给 2 分钟宽容（远小于最小间隔 5 分钟）。
+  const dueAt = Math.max(0, settings.refreshMinutes * 60000 - REFRESH_TOLERANCE)
+  if (!confirmation && !recentlyFinishedConfirmation(widgetSize) && settings.autoRefresh && (!cached || NOW - cached.updatedAt >= dueAt)) {
+    try { cached = await loadCarWithin(REFRESH_BUDGET_MS); writeCache(cached) } catch { /* 网络失败或超时保留上次成功快照 */ }
+    // 等待网络期间可能又点了按钮而产生新的确认单，重新读一次再决定展示什么。
+    confirmation = readWidgetConfirmation(widgetSize)
   }
   const dashboard = widgetSize === 'large' || widgetSize === 'extraLarge'
   const extraLarge = widgetSize === 'extraLarge'
   const path = dashboard ? extraLarge ? settings.extraLargeBackground || settings.largeBackground : settings.largeBackground
     : widgetSize === 'small' ? settings.smallBackground : settings.mediumBackground
-  // 背景图与车图是否存在只用同步检测；车图丢失时清空设置，回退成默认 car.png。
+  // 背景图与车图是否存在只用同步检测。车图丢失时只改本次渲染的显示路径，
+  // 不回写模块级 settings（否则后续读取会拿到被清空的 carImage）。
   const exists = path ? fileExists(path) : false
-  const carExists = settings.carImage ? fileExists(settings.carImage) : true
-  if (!carExists) { settings.carImage = ''; CAR_IMAGE_PATH = imagePath(settings) }
-  cached = readCache()
-  confirmation = readWidgetConfirmation(widgetSize)
+  if (settings.carImage && !fileExists(settings.carImage)) CAR_IMAGE_PATH = carImageFallbackPath()
+  // 确认页只在真正画出来的那一刻开始计 10 秒（hideAt）；到期这票就作废，不再执行指令。
+  // 不做任何“自动返回”的排期：那在 iOS 上兑现不了，点确认/取消才是唯一可靠的返回路径。
+  if (cached) confirmation = armConfirmationWindow(confirmation)
   const content = cached ? confirmation ? <ConfirmationBody state={confirmation} data={cached} /> : <Body data={cached} /> : <Link url={OPEN_URL}><EmptyView /></Link>
-  presentContent(content, confirmation, path, exists)
+  presentContent(content, path, exists)
 }
-main()
+main().catch(() => {
+  // 任何未预料的异常都不能让组件留一片空白：至少把空状态（点了进 App）呈现出来。
+  try { presentContent(<Link url={OPEN_URL}><EmptyView /></Link>) } catch { /* 彻底失败时交给系统占位 */ }
+})

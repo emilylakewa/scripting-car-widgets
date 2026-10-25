@@ -48,36 +48,69 @@ declare const Location: {
   }): Promise<any[] | null>
 }
 
-export function num(v: unknown): number {
+function num(v: unknown): number {
   if (typeof v === 'number') return Number.isFinite(v) ? v : 0
   const n = parseFloat(String(v ?? ''))
   return Number.isFinite(n) ? n : 0
 }
 
-export function list(v: unknown): number[] {
-  return String(v ?? '')
-    .split(',')
-    .map(s => parseInt(s.trim(), 10) || 0)
+/**
+ * 位图字段（车门、车灯、车窗、座椅加热）在接口里可能是：
+ * - 数组：[1, 0, 0, 0]
+ * - 逗号分隔字符串：'0,0,1,0'
+ * - 连续位串：'0100'（部分车机直接回传二进制串）
+ * 无法解析时返回 null（表示“未知”），避免凭空造出 0 造成误判。
+ * 车窗 / 车门 / 车灯 / 座椅加热必须共用这一套解析，否则同一个字段两处读到不同结果。
+ */
+export function bits(value: unknown): number[] | null {
+  if (Array.isArray(value)) return value.length && value.every(v => Number.isInteger(v) && v >= 0) ? value as number[] : null
+  if (typeof value === 'number') return Number.isInteger(value) && value >= 0 ? [value] : null
+  if (typeof value !== 'string' || !value.trim()) return null
+  const parts = value.trim().split(',')
+  if (parts.some(v => !/^\d+$/.test(v.trim()))) return null
+  // 单个且长度 ≥2 的 0/1 串按位展开，其余按数字列表解析。
+  return parts.length === 1 && /^[01]{2,}$/.test(parts[0]) ? parts[0].split('').map(Number) : parts.map(Number)
 }
 
+// 同一次运行里车况缓存只会被本模块的 writeCache / patchCache 改写（全项目只有这里写这个键），
+// 而一次组件渲染会读 2~3 遍（main / 确认单校验 / loadCar 里的上一份快照）。读一次存住即可。
+let cacheMemo: CarData | null | undefined
+let cacheMemoFor = ''
 export function readCache(): CarData | null {
   try {
     const account = readAccount()
     if (!account) return null
+    const identity = accountIdentity(account)
+    if (cacheMemo !== undefined && cacheMemoFor === identity) return cacheMemo
     const data = Storage.get<CarData>(CACHE_KEY + account.provider)
-    return data?.provider === account.provider && data.accountId === accountIdentity(account) ? data : null
+    const valid = data?.provider === account.provider && data.accountId === identity ? data : null
+    cacheMemo = valid
+    cacheMemoFor = identity
+    return valid
   } catch { return null }
 }
 export function writeCache(data: CarData): void {
   try {
     const account = readAccount()
-    if (account && data.provider === account.provider && data.accountId === accountIdentity(account)) Storage.set(CACHE_KEY + account.provider, data)
+    if (account && data.provider === account.provider && data.accountId === accountIdentity(account)) {
+      Storage.set(CACHE_KEY + account.provider, data)
+      cacheMemo = data
+      cacheMemoFor = data.accountId
+    }
   } catch { /* 缓存失败不影响本次刷新 */ }
 }
 
 export function patchCache(patch: Partial<CarData>): void {
-  const d = readCache()
-  if (d) writeCache({ ...d, ...patch })
+  // readCache 已校验过服务与授权，且带模块内缓存，这里不会再多读钥匙串。
+  try {
+    const d = readCache()
+    if (d) {
+      const next = { ...d, ...patch }
+      Storage.set(CACHE_KEY + d.provider, next)
+      cacheMemo = next
+      cacheMemoFor = d.accountId
+    }
+  } catch { /* 缓存失败不影响指令下发 */ }
 }
 
 /** 统一解析接口响应：401 / 403 提示重新授权，其余错误抛出服务端提示。 */
@@ -89,21 +122,26 @@ async function readPayload(res: any): Promise<any> {
   return obj
 }
 
-async function apiGet(account: Account, path: string): Promise<any> {
-  assertCurrentAccount(account)
+// guard 为假时不在每次请求前后各读一遍钥匙串：批量请求（loadCar 并发三条）由调用方
+// 在整批前后各校验一次即可，一次刷新从 7 次钥匙串读取降到 1 次。
+async function apiGet(account: Account, path: string, guard = true): Promise<any> {
+  if (guard) assertCurrentAccount(account)
   const res = await fetch(`https://${PROVIDERS[account.provider].host}${path}`, {
     timeout: 12,
     headers: { 'Content-Type': 'application/json;charset=utf-8', Accept: '*/*', Authorization: account.token },
   })
-  assertCurrentAccount(account)
+  if (guard) assertCurrentAccount(account)
   const obj = await readPayload(res)
-  assertCurrentAccount(account)
   return obj?.data
 }
 
+function locationPath(machineId: string): string {
+  return `/api/trail/getLocation?machineId=${encodeURIComponent(machineId)}`
+}
+
 async function addressOf(lat: number, lng: number): Promise<{ address: string; addressShort: string }> {
-  const fallback = `${lat.toFixed(5)}, ${lng.toFixed(5)}`
   if (!lat || !lng) return { address: '', addressShort: '' }
+  const fallback = `${lat.toFixed(5)}, ${lng.toFixed(5)}`
   // 高德 Key 仅从用户填写的钥匙串项读取，不随脚本导出。
   const amapKey = readAMapKey()
   if (amapKey) {
@@ -146,7 +184,7 @@ async function addressOf(lat: number, lng: number): Promise<{ address: string; a
   }
 }
 
-export function parseTirePressures(raw: unknown): (number | null)[] {
+function parseTirePressures(raw: unknown): (number | null)[] {
   const parts = Array.isArray(raw) ? raw : typeof raw === 'string' ? raw.split(',') : []
   return Array.from({ length: 4 }, (_, index) => {
     const value = parts[index]
@@ -159,23 +197,61 @@ export function parseTirePressures(raw: unknown): (number | null)[] {
   })
 }
 
-export async function loadCar(): Promise<CarData> {
+export type LoadCarOptions = {
+  /**
+   * 轻量模式：只拉车况（getNowCar + getCarOBD），不拉定位、不做逆地理编码。
+   * 指令下发后的状态回读、座椅加热回读都用它：位置那几秒里不可能变，
+   * 省掉一整段串行网络往返，也不再去唤醒系统定位（耗电大头）。
+   */
+  light?: boolean
+}
+
+export async function loadCar(options: LoadCarOptions = {}): Promise<CarData> {
   const account = requireAccount()
+  // 上一份快照里的设备号：定位接口只依赖它，用它把定位提前和车况请求并行发出。
+  // 原来必须等车况返回才发定位请求，白白多等一整段网络往返（通常 200~600ms）。
+  const prev = readCache()
+  const earlyLoc = !options.light && prev?.machineId
+    ? apiGet(account, locationPath(prev.machineId), false).catch(() => null)
+    : null
   const [nowCar, obd] = await Promise.all([
-    apiGet(account, '/api/car/getNowCar'),
-    apiGet(account, '/api/car/getCarOBD'),
+    apiGet(account, '/api/car/getNowCar', false),
+    apiGet(account, '/api/car/getCarOBD', false),
   ])
   const vehicle = nowCar?.carInfo ?? nowCar ?? {}
   const machineId = String(obd?.machineId || vehicle.machineId || '').trim()
   if (!machineId) throw new Error('接口未返回车辆设备号，请确认 Token 对应的车辆')
-  const loc = await apiGet(account, `/api/trail/getLocation?machineId=${encodeURIComponent(machineId)}`).catch(() => null)
-  // 油箱容量只用于换算油量百分比；车机未给时按 75L 估算。
-  const oilBox = num(vehicle.oilBox) || 75
+  let loc: any = null
+  if (options.light) {
+    // 轻量模式：位置直接沿用上一份快照（下面 located 为假的分支）。
+  } else if (prev?.machineId === machineId && earlyLoc) {
+    loc = await earlyLoc
+    // 预取在极端情况下失败（瞬时断网）时补一次请求，不让一次抖动把位置清空。
+    if (!loc) loc = await apiGet(account, locationPath(machineId), false).catch(() => null)
+  } else {
+    loc = await apiGet(account, locationPath(machineId), false).catch(() => null)
+  }
+  // 油箱容量缺失时保留 0（未知），不要用 75L 虚构：那会让油量百分比和
+  // 「加满一箱」金额都按错误的容量算出来，用户看到的是假数字。
+  const oilBox = num(vehicle.oilBox)
   const oil = num(obd?.realTimeOilLevel)
-  const lat = num(loc?.location?.lat)
-  const lng = num(loc?.location?.lng)
-  assertCurrentAccount(account)
-  const addr = await addressOf(lat, lng)
+  // 定位失败（请求报错或返回 0,0）时沿用上一次的有效坐标与地址：
+  // 一次瞬时失败不该把已经解析好的位置清空。
+  const rawLat = num(loc?.location?.lat)
+  const rawLng = num(loc?.location?.lng)
+  const located = !!loc && Number.isFinite(rawLat) && Number.isFinite(rawLng) && !(rawLat === 0 && rawLng === 0)
+  const lat = located ? rawLat : (prev?.lat ?? 0)
+  const lng = located ? rawLng : (prev?.lng ?? 0)
+  // 车辆没挪位（经纬度几乎不变）就直接沿用上次解析好的地址：
+  // 每帧刷新能省掉一次高德请求，没填高德 Key 时还能省掉一次系统逆地理编码（会唤醒定位）。
+  // 上次只拿到坐标占位地址（解析失败）时不沿用，下次照样重试，避免把失败结果粘住。
+  const coords = `${lat.toFixed(5)}, ${lng.toFixed(5)}`
+  const reuse = !!prev && Math.abs(prev.lat - lat) < 1e-5 && Math.abs(prev.lng - lng) < 1e-5 && !!prev.address && prev.address !== coords
+  const addr = !located
+    ? { address: prev?.address || '', addressShort: prev?.addressShort || prev?.address || '' }
+    : reuse && prev
+      ? { address: prev.address, addressShort: prev.addressShort || prev.address }
+      : await addressOf(lat, lng)
   const validNumber = (v: unknown) => v !== null && v !== undefined && String(v).trim() !== '' && Number.isFinite(parseFloat(String(v)))
   const validBits = (v: unknown) => (typeof v === 'string' || typeof v === 'number' || Array.isArray(v)) && /^\d+(,\s*\d+)*$/.test(String(v).trim())
   const availability = {
@@ -205,7 +281,7 @@ export async function loadCar(): Promise<CarData> {
     outsideTemp: num(obd?.outsideTemperature) / 10,
     fuelPct: Math.max(0, Math.min(100, oilBox > 0 ? (oil / oilBox) * 100 : 0)),
     tirePressures: PROVIDERS[account.provider].tires ? parseTirePressures(obd?.tirePressure) : undefined,
-    windows: availability.windows ? list(obd?.carWindow) : [],
+    windows: availability.windows ? bits(obd?.carWindow) ?? [] : [],
     carLamp: String(obd?.carLamp ?? ''),
     carDoor: String(obd?.carDoor ?? ''),
     heatSeat: String(obd?.heatSeat ?? ''),
@@ -222,6 +298,8 @@ export async function sendCommand(command: string, data: unknown, alreadyString 
   const account = requireAccount()
   const car = readCache()
   if (!car?.machineId) throw new Error('还没有车辆设备号，请先刷新一次车况')
+  // 指令下发前再确认一次授权没被切换：确认框停留期间可能刚换了账号。
+  assertCurrentAccount(account)
   const res = await fetch(`https://${PROVIDERS[account.provider].host}/api/command/sendCommand`, {
     method: 'POST', timeout: 12,
     headers: { 'Content-Type': 'application/json;charset=utf-8', Accept: '*/*', Authorization: account.token },

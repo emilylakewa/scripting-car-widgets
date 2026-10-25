@@ -1,18 +1,13 @@
 {
   "name": "小组件车联",
   "iconImage": "",
-  "author": {
-    "name": null,
-    "email": null,
-    "homepage": null
-  },
+  "author": null,
   "entry": "index.tsx",
   "color": "#1F3A5F",
-  "version": "3.3.4",
-  "description": "自动识别奥智联与奥捷智行，支持独立车门和尾门状态及自定义车图大小",
+  "version": "3.10.0",
+  "description": "基于群内大佬「飛」的版本进行少许修改，感谢「飛」的分享与贡献。",
   "intentInputTypes": [],
   "contributors": [],
-  "remoteResource": null,
   "localizedNames": {
     "zh": "小组件车联",
     "en": "CarLink"
@@ -23,5 +18,6 @@
   },
   "runInApp": false,
   "icon": "car.fill",
-  "permissions": null
+  "permissions": null,
+  "remoteResource": null
 }

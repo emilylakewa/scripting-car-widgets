@@ -37,6 +37,29 @@ async function inspect(provider: ProviderId, token: string): Promise<Probe> {
   const obd = await get('/api/car/getCarOBD')
   return { provider, status: obd.status === 'valid' ? deviceId(obd.data?.machineId) ? 'valid' : 'noVehicle' : obd.status }
 }
+/**
+ * 两个服务并发探测，谁先给出可用结果就采用谁；都没成功时等两边都结束，把各自的结论留作报错依据。
+ * 传 `probe` 而不是写死 fetch，方便在脚本里用假结果验证先后顺序。
+ */
+async function raceValid(probe: (provider: ProviderId) => Promise<Probe>): Promise<{ winner: ProviderId | null; results: Probe[] }> {
+  const results: Probe[] = []
+  const winner = await new Promise<ProviderId | null>(resolve => {
+    let pending = 2
+    // probe 理论上不会 reject（inspect 内部全部 catch），但一旦 reject 而没接住，
+    // pending 就永远减不到 0，授权页会永久卡在“识别中”。所以两个分支都显式收尾。
+    const settle = (provider: ProviderId, result: Probe) => {
+      results.push(result)
+      pending--
+      if (result.status === 'valid') resolve(provider)
+      else if (pending === 0) resolve(null)
+    }
+    for (const provider of ['aozhilian', 'aojie'] as const) {
+      probe(provider).then(result => settle(provider, result),
+        () => settle(provider, { provider, status: 'unknown' }))
+    }
+  })
+  return { winner, results }
+}
 export async function detectProvider(token: string, choice: ProviderChoice = 'auto'): Promise<ProviderId> {
   if (choice !== 'auto' && !isProvider(choice)) throw new Error('请选择有效的服务')
   if (choice !== 'auto') {
@@ -46,11 +69,10 @@ export async function detectProvider(token: string, choice: ProviderChoice = 'au
     if (result.status === 'noVehicle') throw new Error('当前账号没有可用车辆，请核对 Token')
     throw new Error('Token 无效或已过期，请核对完整 Authorization 值')
   }
-  const results = await Promise.all([inspect('aozhilian', token), inspect('aojie', token)])
-  const valid = results.filter(result => result.status === 'valid')
-  if (valid.length > 1) throw new Error('两个服务均可使用此 Token，请在“识别方式”中选择实际使用的服务后保存')
-  if (results.some(result => result.status === 'unknown')) throw new Error('网络异常，未能完成自动识别。原配置已保留，请稍后重试或选择服务后保存')
-  if (valid.length === 1) return valid[0].provider
+  // 两个服务同时探测：谁先返回可用（且能查到车辆）就采用谁，另一个的请求结果直接丢弃。
+  const { winner, results } = await raceValid(provider => inspect(provider, token))
+  if (winner) return winner
+  if (results.some(result => result.status === 'unknown')) throw new Error('网络异常，两个服务都没连上。原配置已保留，请稍后重试')
   if (results.some(result => result.status === 'noVehicle')) throw new Error('当前账号没有可用车辆，请核对 Token')
-  throw new Error('未识别到可用服务，Token 可能无效或已过期')
+  throw new Error('Token 无效或已过期，请核对完整 Authorization 值')
 }
