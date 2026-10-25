@@ -28,7 +28,7 @@ import { statusTint, bodyWarnings, trunkOpen } from './vehicle-state'
 import { known, anyBitSet } from './dashboard-model'
 import { CommandConfirmation } from './confirmation-screen'
 import { SettingsScreen } from './settings-screen'
-import { readSettings, centerCarScaleOf, centerLogoScaleOf, centerImagePath, plateText, gradientOf, useAudiLogoOf, centerAddressOf, fontColorOf, buttonIconLineWidthOf } from './settings'
+import { readSettings, settingsForSize, centerCarScaleOf, centerLogoScaleOf, centerImagePath, plateText, gradientOf, useAudiLogoOf, centerAddressOf, fontColorOf, buttonIconLineWidthOf, centerEngineTimeOf } from './settings'
 
 import { commandFor, performControlAction } from './command-confirmation'
 import { buttonIconSVG, buttonIconTint, iconActive, audiLogoSVG, audiLogoSize } from './button-icons'
@@ -185,6 +185,8 @@ function App() {
   const [settings, setSettings] = useState(readSettings)
   // 车辆中心可选择奥迪四环 Logo 或专用车图；车辆大小与 Logo 大小均独立设置。
   // 车辆中心使用独立车图；未设置时使用脚本内置车图，与小组件默认图一致。
+  const carSettings = settingsForSize(settings, 'medium')
+  const engineMinutes = (action: 'cool' | 'hot') => centerEngineTimeOf(settings, action)
   const carImagePath = centerImagePath(settings)
   const centerScale = centerCarScaleOf(settings)
   const logoSize = audiLogoSize(Math.min(190 * centerLogoScaleOf(settings), 260))
@@ -497,7 +499,7 @@ function App() {
                 <ActionTile
                   id="cool"
                   state={false}
-                  label="冷车 30分钟"
+                  label={'冷车 ' + engineMinutes('cool') + ' 分钟'}
                   tint="#0284C7"
                   settings={settings}
                   action={() => run('cool', false)}
@@ -505,7 +507,7 @@ function App() {
                 <ActionTile
                   id="hot"
                   state={false}
-                  label="热车 30分钟"
+                  label={'热车 ' + engineMinutes('hot') + ' 分钟'}
                   tint="#EA580C"
                   settings={settings}
                   action={() => run('hot', false)}

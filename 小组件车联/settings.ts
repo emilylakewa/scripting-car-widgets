@@ -28,12 +28,14 @@ export type WidgetOptions = {
   // 座椅加热挡位：每个按钮槽位各存一份（第 i 项对应第 i 个按钮），与 buttons 一样按尺寸分别保存。
   // 开启时下发 CMD_HEATSEAT 的 type 就是它；关闭时固定 flag 0 / type 0（type 0 表示不带挡位）。
   seatLevels: SeatLevel[]
+  engineTimes: number[]
   fontColor: string; buttonBackgroundColor: string
   carScale: number; backgroundDim: number; buttonCount: number; buttons: string[]
   barWidth: number; barHeight: number
   buttonRadius: number
   useAudiLogo: boolean; showCenterAddress: boolean; hideLocationRow: boolean
   centerCarScale: number; centerLogoScale: number
+  centerCoolMinutes: number; centerHotMinutes: number
   smallStyle: string; smallRingInfo: string; lastButton: string; refreshMinutes: number; autoRefresh: boolean
   carImage: string; centerCarImage: string; smallBackground: string; mediumBackground: string; largeBackground: string
   maintenanceDate: string; insuranceDate: string; inspectionDate: string; maintenanceKm: string
@@ -54,6 +56,7 @@ export const DEFAULTS: Settings = {
   buttonIconOnColor: '', buttonIconOffColor: '', buttonHeight: 31, showButtonLabels: true, buttonIconLineWidth: 1.7,
   // 挡位长度与按钮槽位数对齐，新增槽位时一起加。
   seatLevels: ['1', '1', '1', '1', '1', '1', '1'],
+  engineTimes: [],
   fontColor: '', buttonBackgroundColor: '',
   carScale: 100, backgroundDim: 0, buttonCount: 7,
   // 7 个按钮槽位：前 6 个是原有默认，第 7 个是座椅加热（新按钮，四个尺寸共用同一份默认值）。
@@ -61,10 +64,12 @@ export const DEFAULTS: Settings = {
   barWidth: 94, barHeight: 3,
   buttonRadius: -1,
   useAudiLogo: true, showCenterAddress: true, hideLocationRow: false, centerCarScale: 100, centerLogoScale: 80,
+  centerCoolMinutes: 30, centerHotMinutes: 30,
   smallStyle: 'classic', smallRingInfo: 'oil', lastButton: 'engine', refreshMinutes: 30, autoRefresh: true,
   carImage: '', centerCarImage: '', smallBackground: '', mediumBackground: '', largeBackground: '',
   maintenanceDate: '', insuranceDate: '', inspectionDate: '', maintenanceKm: '',
 }
+DEFAULTS.engineTimes = DEFAULTS.buttons.map(defaultEngineTimeFor)
 declare const Storage: { get<T>(key: string): T | null; set<T>(key: string, value: T): boolean }
 const KEY = 'carlink.car.customization.v1'
 // 设置只在本进程内由 saveSettings 写入，所以内存里缓存一份归一化结果是安全的：
@@ -100,6 +105,8 @@ export function normalizeSettings(saved: Partial<Settings>): Settings {
   settings.showCenterAddress = typeof settings.showCenterAddress === 'boolean' ? settings.showCenterAddress : true
   settings.centerCarScale = Math.round(bounded(settings.centerCarScale, 30, 300, 100))
   settings.centerLogoScale = Math.round(bounded(settings.centerLogoScale, 30, 300, DEFAULTS.centerLogoScale))
+  settings.centerCoolMinutes = asEngineTime(settings.centerCoolMinutes, DEFAULTS.centerCoolMinutes)
+  settings.centerHotMinutes = asEngineTime(settings.centerHotMinutes, DEFAULTS.centerHotMinutes)
   settings.buttonConfirmations = DEFAULTS.buttons.map((_, i) => Array.isArray(saved.buttonConfirmations) && saved.buttonConfirmations[i] === true)
   settings.fontScale = bounded(settings.fontScale, 60, 200, 100)
   settings.updateTimeStyle = settings.updateTimeStyle === 'relative' ? 'relative' : settings.updateTimeStyle === 'full' ? 'full' : 'absolute'
@@ -119,6 +126,8 @@ export function normalizeSettings(saved: Partial<Settings>): Settings {
   settings.refreshMinutes = Math.round(bounded(settings.refreshMinutes, 5, 1440, DEFAULTS.refreshMinutes))
   const buttons = Array.isArray(saved.buttons) ? saved.buttons : ['refresh', 'lock', 'window', saved.lastButton || 'engine', 'find']
   settings.buttons = DEFAULTS.buttons.map((fallback, i) => ACTIONS.some(a => a.id === buttons[i]) ? buttons[i] : fallback)
+  const savedTimes = Array.isArray(saved.engineTimes) ? saved.engineTimes : []
+  settings.engineTimes = DEFAULTS.buttons.map((_, i) => asEngineTime(savedTimes[i], defaultEngineTimeFor(settings.buttons[i])))
   // hideLocationRow：开启后地址/短句整行不渲染，优先级高于 showAddress 与 showLocationCard。
   for (const key of ['showMetrics', 'showStates', 'showTires', 'showLocationCard', 'showReminders', 'hideLocationRow', 'showButtonLabels'] as const) {
     settings[key] = typeof settings[key] === 'boolean' ? settings[key] : DEFAULTS[key]
@@ -174,7 +183,7 @@ export const WIDGET_SIZES: { id: WidgetSize; name: string }[] = [
 const PROFILE_KEYS = [
   'theme', 'themeColor1', 'themeColor2', 'themeAccent', 'name', 'plate', 'showPlate', 'showAddress', 'hideLocationRow', 'quote', 'showIcons', 'showTemp',
   'fontScale', 'fontColor', 'infoBackgroundColor', 'infoBackgroundTransparency',
-  'buttonBackgroundColor', 'buttonBackgroundTransparency', 'buttonConfirmations', 'seatLevels',
+  'buttonBackgroundColor', 'buttonBackgroundTransparency', 'buttonConfirmations', 'seatLevels', 'engineTimes',
   // useAudiLogo 只影响车辆中心主页，已移入根级设置，不再按尺寸保存。
   'buttonIconOnColor', 'buttonIconOffColor', 'buttonHeight', 'buttonRadius', 'showButtonLabels',
   'carScale', 'barWidth', 'barHeight', 'backgroundDim', 'buttonCount', 'buttons', 'smallStyle', 'smallRingInfo', 'lastButton',
@@ -263,6 +272,12 @@ export const buttonHeightOf = memoized((s: Settings) => Math.round(bounded(s.but
 export const buttonIconLineWidthOf = memoized((s: Settings) => Math.round(bounded(s.buttonIconLineWidth, 0.8, 3.2, 1.7) * 10) / 10)
 // 座椅加热挡位：按按钮槽位取（每个按钮各一份），槽位没设置过或越界时回到 1 挡。
 export function seatLevelOf(s: Settings, slot: number): SeatLevel { return s.seatLevels[slot] ?? '1' }
+export const ENGINE_TIME_MIN = 1
+export const ENGINE_TIME_MAX = 30
+export function defaultEngineTimeFor(action: string | undefined): number { return action === 'cool' || action === 'hot' ? 30 : 10 }
+export function asEngineTime(value: unknown, fallback: number): number { return Math.round(bounded(value, ENGINE_TIME_MIN, ENGINE_TIME_MAX, fallback)) }
+export function engineTimeOf(s: Settings, slot: number): number { return asEngineTime(s.engineTimes?.[slot], defaultEngineTimeFor(s.buttons[slot])) }
+export function centerEngineTimeOf(s: Settings, action: 'cool' | 'hot'): number { return asEngineTime(action === 'cool' ? s.centerCoolMinutes : s.centerHotMinutes, defaultEngineTimeFor(action)) }
 const buttonRadiusBase = memoized((s: Settings) => Math.round(bounded(s.buttonRadius, -1, 60, DEFAULTS.buttonRadius)))
 // 控制按钮圆角：-1 表示随高度自动（原有观感），其余按设定值，最大不超过高度的一半。
 export function buttonRadiusOf(s: Settings, height: number, autoMax = 10): number {

@@ -17,7 +17,7 @@ import type { Color } from 'scripting'
 import { loadCar, writeCache, readCache, type CarData } from './api'
 import { BeginConfirmationIntent, CancelConfirmationIntent, SubmitConfirmationIntent, ACIntent, SeatIntent, TrunkIntent, CoolIntent, HotIntent, FindIntent, EngineIntent, LockIntent, RefreshIntent, WindowIntent } from './app_intents'
 
-import { readSettingsForSize, widgetSizeFor, infoBackgroundOf, visibleButtons, fontSizeOf, fontColorOf, buttonBackgroundOf, buttonHeightOf, buttonIconColorOf, buttonIconLineWidthOf, carScaleOf, backgroundDimOf, barSizeOf, buttonRadiusOf, imagePath, gradientOf, plateText, reminderLines, themeOf } from './settings'
+import { readSettingsForSize, widgetSizeFor, infoBackgroundOf, visibleButtons, fontSizeOf, fontColorOf, buttonBackgroundOf, buttonHeightOf, buttonIconColorOf, buttonIconLineWidthOf, carScaleOf, backgroundDimOf, barSizeOf, buttonRadiusOf, imagePath, gradientOf, plateText, reminderLines, themeOf, engineTimeOf } from './settings'
 import { buttonIconSVG, buttonIconTint, iconActive } from './button-icons'
 import { updateText, supportsTires } from './credentials'
 import { armConfirmationWindow, CONFIRM_SECONDS, readWidgetConfirmation, recentlyFinishedConfirmation, type WidgetConfirmation } from './widget-confirmation'
@@ -328,8 +328,8 @@ function directButtonAction(id: string, d: CarData, slot: number) {
     case 'window': return { state: windowsAreOpen, target: !windowsAreOpen, label: windowsAreOpen ? '关窗' : '开窗', intent: WindowIntent({ ...binding, open: !windowsAreOpen }), tint }
     case 'engine': return { state: d.engineOn === true, target: !d.engineOn, label: d.engineOn ? '熄火' : '启动', intent: EngineIntent({ ...binding, start: !d.engineOn }), tint }
     case 'find': return { state: false, target: false, label: '寻车', intent: FindIntent(binding), tint }
-    case 'cool': return { state: false, target: false, label: '冷车', intent: CoolIntent(binding), tint }
-    case 'hot': return { state: false, target: false, label: '热车', intent: HotIntent(binding), tint }
+    case 'cool': return { state: false, target: false, label: '冷车 ' + engineTimeOf(settings, slot) + ' 分钟', intent: CoolIntent(binding), tint }
+    case 'hot': return { state: false, target: false, label: '热车 ' + engineTimeOf(settings, slot) + ' 分钟', intent: HotIntent(binding), tint }
     case 'ac': return { state: d.acOn === true, target: !d.acOn, label: d.acOn ? '关空调' : '开空调', intent: ACIntent({ ...binding, on: !d.acOn }), tint }
     // 座椅加热：heatSeat 位串只要有一位非 0 就算已开启；下发 CMD_HEATSEAT（开启 flag 1 + 设置里的挡位，关闭 flag 0 + type 0）。
     case 'seat': { const heatOn = anyBitSet(d.heatSeat); return { state: heatOn, target: !heatOn, label: heatOn ? '关加热' : '开加热', intent: SeatIntent({ ...binding, on: !heatOn }), tint } }

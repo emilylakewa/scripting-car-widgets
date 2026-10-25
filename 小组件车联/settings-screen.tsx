@@ -1,5 +1,5 @@
 import { Button, ColorPicker, DatePicker, HStack, List, Navigation, NavigationLink, NavigationStack, Picker, RoundedRectangle, SVG, Section, SecureField, Spacer, Text, TextField, Toggle, VStack, ZStack, Widget, useState, Script, useEffect } from 'scripting'
-import { DEFAULTS, THEMES, CUSTOM_THEME_ID, ACTIONS, COLOR_PRESETS, INFO_OPTIONS, WIDGET_SIZES, normalizeColor, fontSizeOf, dateValue, dateText, centerAddressOf, useAudiLogoOf, readSettings, saveSettings, settingsForSize, withWidgetSettings, withoutWidgetSettings, buttonBackgroundOf, buttonHeightOf, buttonIconColorOf, buttonIconLineWidthOf, seatLevelOf, SEAT_LEVELS, asSeatLevel, buttonRadiusOf, defaultButtonHeightFor, themeOf, visibleButtons, type Settings, type WidgetSize, type WidgetOptions } from './settings'
+import { DEFAULTS, THEMES, CUSTOM_THEME_ID, ACTIONS, COLOR_PRESETS, INFO_OPTIONS, WIDGET_SIZES, normalizeColor, fontSizeOf, dateValue, dateText, centerAddressOf, useAudiLogoOf, readSettings, saveSettings, settingsForSize, withWidgetSettings, withoutWidgetSettings, buttonBackgroundOf, buttonHeightOf, buttonIconColorOf, buttonIconLineWidthOf, seatLevelOf, SEAT_LEVELS, asSeatLevel, engineTimeOf, defaultEngineTimeFor, centerEngineTimeOf, ENGINE_TIME_MIN, ENGINE_TIME_MAX, buttonRadiusOf, defaultButtonHeightFor, themeOf, visibleButtons, type Settings, type WidgetSize, type WidgetOptions } from './settings'
 import { buttonIconSVG, buttonIconTint, iconActive } from './button-icons'
 import { PROVIDERS, type ProviderChoice } from './providers'
 import { readToken, saveToken, readAMapKey, saveAMapKey, currentProviderLabel, supportsTires, updateText } from './credentials'
@@ -190,6 +190,10 @@ export function SettingsScreen() {
       }} />
       {s.centerCarImage ? <Button title="恢复内置车辆中心车图" action={() => update('centerCarImage', '')} /> : null}
       <Toggle title="显示车辆位置" value={centerAddressOf(s)} onChanged={v => update('showCenterAddress', v)} />
+      <NumberPicker title="冷车运行时间" value={centerEngineTimeOf(s, 'cool')} options={[5, 10, 15, 20, 25, 30]} min={ENGINE_TIME_MIN} max={ENGINE_TIME_MAX}
+        hint={'1 – ' + ENGINE_TIME_MAX + ' 分钟（车机上限）'} label={v => v + ' 分钟' + (v === 30 ? '（默认）' : '')} onChanged={v => update('centerCoolMinutes', v)} />
+      <NumberPicker title="热车运行时间" value={centerEngineTimeOf(s, 'hot')} options={[5, 10, 15, 20, 25, 30]} min={ENGINE_TIME_MIN} max={ENGINE_TIME_MAX}
+        hint={'1 – ' + ENGINE_TIME_MAX + ' 分钟（车机上限）'} label={v => v + ' 分钟' + (v === 30 ? '（默认）' : '')} onChanged={v => update('centerHotMinutes', v)} />
     </Section>
     <Section header={<Text>数据管理</Text>}>
       {menu('备份/恢复', '备份、恢复与重置全部设置', <BackupScreen />)}
@@ -552,6 +556,10 @@ function ButtonsScreen({ size }: { size: WidgetSize }) {
       }}>
         {SEAT_LEVELS.map(level => <Text key={level} tag={level}>{level} 挡</Text>)}
       </Picker> : null}
+      {value === 'engine' || value === 'cool' || value === 'hot' ? <NumberPicker title="运行时间" value={engineTimeOf(s, index)} options={[5, 10, 15, 20, 25, 30]} min={ENGINE_TIME_MIN} max={ENGINE_TIME_MAX}
+        hint={'1 – ' + ENGINE_TIME_MAX + ' 分钟（车机上限）'} label={v => v + ' 分钟' + (v === defaultEngineTimeFor(value) ? '（默认）' : '')} onChanged={v => {
+          const times = [...settingsForSize(readSettings(), size).engineTimes]; times[index] = v; update('engineTimes', times)
+        }} /> : null}
     </Section>)}
   </>)
 }
